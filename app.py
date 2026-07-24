@@ -3,6 +3,7 @@ import requests
 import json
 import os
 from datetime import datetime
+from collections import defaultdict
 
 app = Flask(__name__)
 
@@ -12,7 +13,6 @@ REFRESH_TOKEN = os.environ.get("REFRESH_TOKEN", "")
 SLUG = "tina-vell"
 CLUSTER = "https://app.teamly.ru"
 
-# Пока один проект. Позже сделаем список.
 PROJECTS = {
     "burevestnik": {
         "name": "Буревестник",
@@ -40,7 +40,6 @@ def get_token():
     now = int(datetime.now().timestamp())
     if access_token and now < access_token_expires - 60:
         return access_token
-
     r = requests.post(
         f"https://{SLUG}.teamly.ru/api/v1/auth/integration/refresh",
         json={
@@ -73,19 +72,6 @@ def api(endpoint, payload):
         raise Exception(f"API {r.status_code}: {r.text[:300]}")
     return r.json()
 
-def get_rows(table_id):
-    data = api("/api/v1/ql/content-database/content", {
-        "query": {
-            "__filter": {"contentDatabaseId": table_id},
-            "content": {
-                "article": {"id": True, "title": True},
-                "hasNested": True
-            }
-        }
-    })
-    return [{"id": i["article"]["id"], "title": i["article"].get("title", "")} 
-            for i in data.get("content", [])]
-
 def extract_text(editor):
     if not editor:
         return ""
@@ -103,24 +89,133 @@ def extract_text(editor):
         return ""
     return walk(doc).strip()
 
-def get_card(cid):
+def get_card_full(cid):
     data = api("/api/v1/wiki/ql/article", {
         "query": {
             "__filter": {"id": cid},
             "id": True,
             "title": True,
-            "editorContent": True
+            "editorContent": True,
+            "properties": {"properties": True}
         }
     })
+    props = data.get("properties", {}).get("properties", {})
+    parent_id = None
+    # Пытаемся найти родительское событие в свойствах
+    for k, v in props.items():
+        if isinstance(v, list) and v and isinstance(v[0], dict) and "id" in v[0]:
+            # Это похоже на relation. Для простоты берём первое, если ключ похож на parent
+            if "parent" in k.lower() or "родител" in str(k).lower():
+                parent_id = v[0]["id"]
+                break
+        # Иногда parent хранится иначе — пока оставляем None
     return {
         "id": data.get("id"),
         "title": data.get("title", ""),
-        "body": extract_text(data.get("editorContent"))
+        "body": extract_text(data.get("editorContent")),
+        "parent_id": parent_id,
+        "properties": props
     }
+
+def get_all_events(table_id):
+    """Получаем все события + пытаемся вытащить родителя"""
+    data = api("/api/v1/ql/content-database/content", {
+        "query": {
+            "__filter": {"contentDatabaseId": table_id},
+            "content": {
+                "article": {
+                    "id": True,
+                    "title": True,
+                    "properties": {"properties": True}
+                },
+                "hasNested": True
+            }
+        }
+    })
+    events = []
+    for item in data.get("content", []):
+        art = item.get("article", {})
+        props = art.get("properties", {}).get("properties", {})
+        parent_id = None
+        # Ищем relation на родителя
+        for k, v in props.items():
+            if isinstance(v, list) and len(v) > 0:
+                if isinstance(v[0], dict) and "id" in v[0]:
+                    # Грубая эвристика: если в названии свойства есть parent/родител
+                    if "parent" in k.lower() or "родител" in k.lower() or k in ("parent", "parentId"):
+                        parent_id = v[0]["id"]
+                        break
+        events.append({
+            "id": art.get("id"),
+            "title": art.get("title", ""),
+            "parent_id": parent_id
+        })
+    return events
+
+def build_tree(events):
+    by_id = {e["id"]: e for e in events}
+    children = defaultdict(list)
+    roots = []
+    for e in events:
+        pid = e.get("parent_id")
+        if pid and pid in by_id:
+            children[pid].append(e["id"])
+        else:
+            roots.append(e["id"])
+    return by_id, children, roots
+
+def get_ancestors(event_id, by_id):
+    """Собирает цепочку предков (то, что было до)"""
+    ancestors = []
+    current = by_id.get(event_id)
+    visited = set()
+    while current and current.get("parent_id") and current["parent_id"] not in visited:
+        pid = current["parent_id"]
+        visited.add(pid)
+        parent = by_id.get(pid)
+        if parent:
+            ancestors.append(parent)
+            current = parent
+        else:
+            break
+    return list(reversed(ancestors))  # от корня к выбранному
+
+def get_descendants(event_id, children, depth_mode):
+    """Собирает потомков в зависимости от глубины"""
+    result = []
+    def walk(eid, level):
+        for child_id in children.get(eid, []):
+            result.append(child_id)
+            if depth_mode == "scenes" or (depth_mode == "chapters" and level < 1):
+                walk(child_id, level + 1)
+    if depth_mode != "arcs":
+        walk(event_id, 0)
+    return result
 
 @app.route("/", methods=["GET"])
 def index():
-    return """
+    # Получаем список событий для чекбоксов
+    try:
+        events = get_all_events(PROJECTS["burevestnik"]["tables"]["events"])
+        # Показываем в основном корневые и средние
+        by_id, children, roots = build_tree(events)
+        # Берём корни + прямых детей корней для выбора
+        selectable = []
+        for rid in roots:
+            selectable.append(by_id[rid])
+            for cid in children.get(rid, [])[:8]:
+                selectable.append(by_id[cid])
+    except Exception as e:
+        selectable = []
+        error_msg = str(e)
+    else:
+        error_msg = None
+
+    checkboxes = ""
+    for ev in selectable:
+        checkboxes += f'<label><input type="checkbox" name="events" value="{ev["id"]}"> {ev["title"]}</label>\n'
+
+    return f"""
 <!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -128,30 +223,50 @@ def index():
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Срез Teamly</title>
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 20px; color: #1a1a1a; }
-        h1 { font-size: 1.6rem; margin-bottom: 8px; }
-        .desc { color: #555; margin-bottom: 28px; }
-        label { display: block; margin: 14px 0 6px; font-weight: 600; }
-        select, input[type=number] { width: 100%; padding: 10px; font-size: 1rem; border: 1px solid #ccc; border-radius: 8px; }
-        .checkboxes label { font-weight: 400; margin: 6px 0; }
-        .checkboxes input { margin-right: 8px; }
-        button { margin-top: 28px; width: 100%; padding: 14px; font-size: 1.1rem; background: #4f46e5; color: white; border: none; border-radius: 10px; cursor: pointer; }
-        button:hover { background: #4338ca; }
-        .hint { font-size: 0.85rem; color: #777; margin-top: 4px; }
+        body {{ font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 680px; margin: 40px auto; padding: 0 20px; color: #1a1a1a; }}
+        h1 {{ font-size: 1.5rem; }}
+        label {{ display: block; margin: 8px 0; }}
+        .section {{ margin: 22px 0; }}
+        .checkboxes {{ max-height: 280px; overflow-y: auto; border: 1px solid #ddd; padding: 12px; border-radius: 8px; }}
+        select {{ width: 100%; padding: 10px; font-size: 1rem; border-radius: 8px; border: 1px solid #ccc; }}
+        button {{ margin-top: 24px; width: 100%; padding: 14px; font-size: 1.1rem; background: #4f46e5; color: white; border: none; border-radius: 10px; cursor: pointer; }}
+        .hint {{ font-size: 0.85rem; color: #666; }}
+        .error {{ color: #b91c1c; background: #fef2f2; padding: 10px; border-radius: 8px; }}
     </style>
 </head>
 <body>
     <h1>Срез базы Teamly</h1>
-    <p class="desc">Собери курируемый срез для работы в чате</p>
+    <p class="hint">Выбери арки/главы — система подтянет то, что было до них</p>
+
+    {"<div class='error'>Не удалось загрузить список событий: " + error_msg + "</div>" if error_msg else ""}
 
     <form action="/slice" method="get">
-        <label>Проект</label>
-        <select name="project">
-            <option value="burevestnik">Буревестник</option>
-        </select>
+        <div class="section">
+            <strong>Проект</strong>
+            <select name="project">
+                <option value="burevestnik">Буревестник</option>
+            </select>
+        </div>
 
-        <label>Таблицы</label>
-        <div class="checkboxes">
+        <div class="section">
+            <strong>Арки / Главы (можно несколько)</strong>
+            <div class="checkboxes">
+                {checkboxes if checkboxes else "<p>События не загрузились</p>"}
+            </div>
+            <p class="hint">Если ничего не выбрать — будут взяты все корневые события</p>
+        </div>
+
+        <div class="section">
+            <strong>Глубина внутри выбранного</strong>
+            <select name="depth">
+                <option value="arcs">Только выбранные (без детей)</option>
+                <option value="chapters" selected>Выбранные + прямые дети</option>
+                <option value="scenes">Выбранные + вся глубина</option>
+            </select>
+        </div>
+
+        <div class="section">
+            <strong>Таблицы</strong>
             <label><input type="checkbox" name="tables" value="characters" checked> Персонажи</label>
             <label><input type="checkbox" name="tables" value="events" checked> События</label>
             <label><input type="checkbox" name="tables" value="locations" checked> Локации</label>
@@ -159,20 +274,14 @@ def index():
             <label><input type="checkbox" name="tables" value="world"> Мир</label>
         </div>
 
-        <label>Уровень дробления событий</label>
-        <select name="depth">
-            <option value="arcs">Только арки (крупные блоки)</option>
-            <option value="chapters" selected>Арки + главы</option>
-            <option value="scenes">Арки + главы + сцены (максимум)</option>
-        </select>
-        <div class="hint">Пока влияет на количество и порядок. Полная иерархия будет в следующей версии.</div>
-
-        <label>Объём среза</label>
-        <select name="volume">
-            <option value="compact">Компактный (~45 тыс.)</option>
-            <option value="working" selected>Рабочий (~110 тыс.)</option>
-            <option value="full">Полный (без лимита)</option>
-        </select>
+        <div class="section">
+            <strong>Объём</strong>
+            <select name="volume">
+                <option value="compact">Компактный (~45 тыс.)</option>
+                <option value="working" selected>Рабочий (~110 тыс.)</option>
+                <option value="full">Полный</option>
+            </select>
+        </div>
 
         <button type="submit">Собрать срез</button>
     </form>
@@ -183,80 +292,112 @@ def index():
 @app.route("/slice")
 def slice():
     project_key = request.args.get("project", "burevestnik")
-    selected_tables = request.args.getlist("tables")
+    selected_event_ids = request.args.getlist("events")
     depth = request.args.get("depth", "chapters")
     volume = request.args.get("volume", "working")
-
-    if not selected_tables:
-        selected_tables = ["characters", "events", "locations"]
+    selected_tables = request.args.getlist("tables") or ["characters", "events", "locations"]
 
     limit = VOLUME_LIMITS.get(volume, 110000)
-    project = PROJECTS.get(project_key)
-    if not project:
-        return "Проект не найден", 404
+    project = PROJECTS[project_key]
+    events_table_id = project["tables"]["events"]
+
+    # Загружаем все события и строим дерево
+    all_events = get_all_events(events_table_id)
+    by_id, children, roots = build_tree(all_events)
+
+    # Определяем, какие события включать
+    to_include = set()
+
+    if not selected_event_ids:
+        # Если ничего не выбрано — берём корни
+        selected_event_ids = roots
+
+    for eid in selected_event_ids:
+        if eid not in by_id:
+            continue
+        # Предки (то, что было до)
+        for anc in get_ancestors(eid, by_id):
+            to_include.add(anc["id"])
+        # Само событие
+        to_include.add(eid)
+        # Потомки по глубине
+        for desc in get_descendants(eid, children, depth):
+            to_include.add(desc)
+
+    # Порядок: сначала корни, потом по дереву
+    ordered_ids = []
+    def add_with_children(eid):
+        if eid in to_include and eid not in ordered_ids:
+            ordered_ids.append(eid)
+            for cid in children.get(eid, []):
+                add_with_children(cid)
+    for rid in roots:
+        add_with_children(rid)
+    # На всякий случай добавляем оставшиеся
+    for eid in to_include:
+        if eid not in ordered_ids:
+            ordered_ids.append(eid)
 
     result = []
     result.append(f"# Срез: {project['name']}")
     result.append(f"Собран: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     result.append(f"Режим: {volume} | Глубина: {depth}")
+    result.append(f"Выбрано событий: {len(selected_event_ids)} → итого в срезе: {len(ordered_ids)}")
     result.append("")
 
     current_len = 0
-    cards_added = 0
 
-    # Порядок приоритета
-    priority = ["characters", "events", "locations", "chapters", "world"]
+    # События
+    if "events" in selected_tables:
+        result.append("\n## СОБЫТИЯ\n")
+        for eid in ordered_ids:
+            if current_len > limit:
+                result.append("\n--- Обрезано по лимиту ---\n")
+                break
+            try:
+                card = get_card_full(eid)
+                block = f"### {card['title']}\n{card['body']}\n\n"
+                if current_len + len(block) > limit:
+                    result.append("\n--- Обрезано по лимиту ---\n")
+                    break
+                result.append(block)
+                current_len += len(block)
+            except Exception as e:
+                result.append(f"### [ошибка {eid}]: {e}\n\n")
 
+    # Остальные таблицы (персонажи, локации...)
+    priority = ["characters", "locations", "chapters", "world"]
     for table_key in priority:
-        if table_key not in selected_tables:
+        if table_key not in selected_tables or current_len > limit:
             continue
         table_id = project["tables"].get(table_key)
         if not table_id:
             continue
-
-        rows = get_rows(table_id)
-
-        # Простое ограничение по глубине (пока количественное)
-        if table_key == "events":
-            if depth == "arcs":
-                rows = rows[:6]
-            elif depth == "chapters":
-                rows = rows[:14]
-            else:
-                rows = rows[:30]
-        else:
-            rows = rows[:20]
-
-        section = [f"\n## {table_key.upper()} ({len(rows)} карточек)\n"]
-        section_len = sum(len(s) for s in section)
-
-        for row in rows:
-            if current_len + section_len > limit:
+        data = api("/api/v1/ql/content-database/content", {
+            "query": {
+                "__filter": {"contentDatabaseId": table_id},
+                "content": {"article": {"id": True, "title": True}, "hasNested": True}
+            }
+        })
+        rows = [{"id": i["article"]["id"], "title": i["article"].get("title", "")} for i in data.get("content", [])]
+        result.append(f"\n## {table_key.upper()} ({len(rows)})\n")
+        for row in rows[:15]:
+            if current_len > limit:
                 break
             try:
-                card = get_card(row["id"])
+                card = get_card_full(row["id"])
                 block = f"### {card['title']}\n{card['body']}\n\n"
                 if current_len + len(block) > limit:
-                    result.append("\n--- Обрезано по лимиту объёма ---\n")
                     break
-                section.append(block)
+                result.append(block)
                 current_len += len(block)
-                cards_added += 1
-            except Exception as e:
-                section.append(f"### {row['title']}\n[ошибка загрузки: {e}]\n\n")
-
-        result.extend(section)
-        if current_len >= limit:
-            break
+            except:
+                pass
 
     text = "\n".join(result)
     filename = f"slice_{project_key}_{datetime.now().strftime('%Y%m%d_%H%M')}.md"
-
-    return Response(
-        text,
-        mimetype="text/markdown",
-        headers={"Content-Disposition": f"attachment; filename={filename}"}
-    )
+    return Response(text, mimetype="text/markdown",
+                    headers={"Content-Disposition": f"attachment; filename={filename}"})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
