@@ -36,25 +36,8 @@ access_token = None
 access_token_expires = 0
 
 def get_token():
-    global access_token, access_token_expires
-    now = int(datetime.now().timestamp())
-    if access_token and now < access_token_expires - 60:
-        return access_token
-    r = requests.post(
-        f"https://app.teamly.ru/api/v1/auth/integration/refresh",
-        json={
-            "client_id": CLIENT_ID,
-            "client_secret": CLIENT_SECRET,
-            "refresh_token": REFRESH_TOKEN
-        },
-        timeout=30
-    )
-    if r.status_code != 200:
-        raise Exception(f"Token error: {r.text}")
-    data = r.json()
-    access_token = data["access_token"]
-    access_token_expires = data.get("access_token_expires_at", now + 3600)
-    return access_token
+    # Временно используем access_token напрямую (refresh пока не работает)
+    return "eyJ0eXAiOiJKV1QiLCJhbGciOiJFZERTQSJ9.eyJqdGkiOiJhMDg5NTQ0ZTNhMDA0NDQ1MTRkNTk3MjJiZTk0ZjdmMDk2M2I2OWFjOTU0NjdmN2RlYWJkMzU0NzcxZTk2MjRjN2ZhYThiNjFlY2JiNWU3OCIsImF1ZCI6ImVhNjVkMmUxLWRkMzEtNDQ0My1hOTAzLTZmMTBiODdmMDE5NCIsInN1YiI6IjkyMjQzZmQ2LTY3ZTEtNDlmNS1iNzc0LWY1MDJkZmM1M2QyMyIsImlhdCI6MTc4NDkxNDQ3MS44MjE3MTksIm5iZiI6MTc4NDkxNDQ3MS44MjE3MiwiZXhwIjoxNzg1MDg3MjcxLjgwMzQwMywic2NvcGVzIjpbImV4dGVybmFsIl0sImFmaSI6IjUzNGI4MmI2LTBmNjktNDNkYS1hMGRhLWEzYWE3NTg0MzYzYyJ9.Iq96yn9MVjEy95EEhOQ5QGIscDXg6jSd6reUBglbHsQc1SxTY_3PG7jKfrNbSctHNlD3Z5VVY9AnqSA3XsZGAg"
 
 def api(endpoint, payload):
     token = get_token()
