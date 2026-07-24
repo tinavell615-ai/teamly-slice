@@ -41,7 +41,7 @@ def get_token():
     if access_token and now < access_token_expires - 60:
         return access_token
     r = requests.post(
-        f"https://{SLUG}.teamly.ru/api/v1/auth/integration/refresh",
+        f"https://app.teamly.ru/api/v1/auth/integration/refresh",
         json={
             "client_id": CLIENT_ID,
             "client_secret": CLIENT_SECRET,
