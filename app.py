@@ -1,4 +1,4 @@
-from flask import Flask, Response
+from flask import Flask, request, Response
 import requests
 import json
 import os
@@ -6,17 +6,30 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-# Эти значения потом поставим в Variables на Railway
 CLIENT_ID = os.environ.get("CLIENT_ID", "")
 CLIENT_SECRET = os.environ.get("CLIENT_SECRET", "")
 REFRESH_TOKEN = os.environ.get("REFRESH_TOKEN", "")
 SLUG = "tina-vell"
 CLUSTER = "https://app.teamly.ru"
 
-TABLES = {
-    "characters": "d0f91b04-7924-4fd2-9450-58cf6c12a89f",
-    "events": "bd5891eb-976b-4f7b-8bf0-5cb19d53c302",
-    "locations": "6d9b436c-e213-49a2-8bec-2d109cef7280",
+# Пока один проект. Позже сделаем список.
+PROJECTS = {
+    "burevestnik": {
+        "name": "Буревестник",
+        "tables": {
+            "characters": "d0f91b04-7924-4fd2-9450-58cf6c12a89f",
+            "world": "be3811c2-70cc-4581-9f95-3e512da235d9",
+            "locations": "6d9b436c-e213-49a2-8bec-2d109cef7280",
+            "events": "bd5891eb-976b-4f7b-8bf0-5cb19d53c302",
+            "chapters": "c288e5e4-ae16-44e2-8937-63e0ed8dd748"
+        }
+    }
+}
+
+VOLUME_LIMITS = {
+    "compact": 45000,
+    "working": 110000,
+    "full": 999999
 }
 
 access_token = None
@@ -34,7 +47,8 @@ def get_token():
             "client_id": CLIENT_ID,
             "client_secret": CLIENT_SECRET,
             "refresh_token": REFRESH_TOKEN
-        }
+        },
+        timeout=30
     )
     if r.status_code != 200:
         raise Exception(f"Token error: {r.text}")
@@ -52,10 +66,11 @@ def api(endpoint, payload):
             "X-Account-Slug": SLUG,
             "Content-Type": "application/json"
         },
-        json=payload
+        json=payload,
+        timeout=60
     )
     if r.status_code != 200:
-        raise Exception(f"API error {r.status_code}: {r.text[:200]}")
+        raise Exception(f"API {r.status_code}: {r.text[:300]}")
     return r.json()
 
 def get_rows(table_id):
@@ -68,7 +83,8 @@ def get_rows(table_id):
             }
         }
     })
-    return [{"id": i["article"]["id"], "title": i["article"]["title"]} for i in data.get("content", [])]
+    return [{"id": i["article"]["id"], "title": i["article"].get("title", "")} 
+            for i in data.get("content", [])]
 
 def extract_text(editor):
     if not editor:
@@ -97,42 +113,150 @@ def get_card(cid):
         }
     })
     return {
+        "id": data.get("id"),
         "title": data.get("title", ""),
         "body": extract_text(data.get("editorContent"))
     }
 
-@app.route("/")
+@app.route("/", methods=["GET"])
 def index():
     return """
-    <html>
-    <head><title>Teamly Slice</title></head>
-    <body style="font-family: sans-serif; max-width: 600px; margin: 50px auto; text-align: center;">
-        <h1>Срез базы Teamly</h1>
-        <p>Нажми кнопку, чтобы собрать актуальный срез</p>
-        <a href="/slice" style="display:inline-block; padding: 15px 30px; background:#4f46e5; color:white; text-decoration:none; border-radius:8px; font-size:18px;">
-            Собрать срез
-        </a>
-    </body>
-    </html>
-    """
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Срез Teamly</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 20px; color: #1a1a1a; }
+        h1 { font-size: 1.6rem; margin-bottom: 8px; }
+        .desc { color: #555; margin-bottom: 28px; }
+        label { display: block; margin: 14px 0 6px; font-weight: 600; }
+        select, input[type=number] { width: 100%; padding: 10px; font-size: 1rem; border: 1px solid #ccc; border-radius: 8px; }
+        .checkboxes label { font-weight: 400; margin: 6px 0; }
+        .checkboxes input { margin-right: 8px; }
+        button { margin-top: 28px; width: 100%; padding: 14px; font-size: 1.1rem; background: #4f46e5; color: white; border: none; border-radius: 10px; cursor: pointer; }
+        button:hover { background: #4338ca; }
+        .hint { font-size: 0.85rem; color: #777; margin-top: 4px; }
+    </style>
+</head>
+<body>
+    <h1>Срез базы Teamly</h1>
+    <p class="desc">Собери курируемый срез для работы в чате</p>
+
+    <form action="/slice" method="get">
+        <label>Проект</label>
+        <select name="project">
+            <option value="burevestnik">Буревестник</option>
+        </select>
+
+        <label>Таблицы</label>
+        <div class="checkboxes">
+            <label><input type="checkbox" name="tables" value="characters" checked> Персонажи</label>
+            <label><input type="checkbox" name="tables" value="events" checked> События</label>
+            <label><input type="checkbox" name="tables" value="locations" checked> Локации</label>
+            <label><input type="checkbox" name="tables" value="chapters"> Главы / Части</label>
+            <label><input type="checkbox" name="tables" value="world"> Мир</label>
+        </div>
+
+        <label>Уровень дробления событий</label>
+        <select name="depth">
+            <option value="arcs">Только арки (крупные блоки)</option>
+            <option value="chapters" selected>Арки + главы</option>
+            <option value="scenes">Арки + главы + сцены (максимум)</option>
+        </select>
+        <div class="hint">Пока влияет на количество и порядок. Полная иерархия будет в следующей версии.</div>
+
+        <label>Объём среза</label>
+        <select name="volume">
+            <option value="compact">Компактный (~45 тыс.)</option>
+            <option value="working" selected>Рабочий (~110 тыс.)</option>
+            <option value="full">Полный (без лимита)</option>
+        </select>
+
+        <button type="submit">Собрать срез</button>
+    </form>
+</body>
+</html>
+"""
 
 @app.route("/slice")
 def slice():
-    result = [f"# Срез базы Teamly\nСобран: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"]
-    
-    for name, tid in TABLES.items():
-        rows = get_rows(tid)[:8]  # берём по 8 карточек
-        result.append(f"\n## {name.upper()} ({len(rows)} карточек)\n")
+    project_key = request.args.get("project", "burevestnik")
+    selected_tables = request.args.getlist("tables")
+    depth = request.args.get("depth", "chapters")
+    volume = request.args.get("volume", "working")
+
+    if not selected_tables:
+        selected_tables = ["characters", "events", "locations"]
+
+    limit = VOLUME_LIMITS.get(volume, 110000)
+    project = PROJECTS.get(project_key)
+    if not project:
+        return "Проект не найден", 404
+
+    result = []
+    result.append(f"# Срез: {project['name']}")
+    result.append(f"Собран: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    result.append(f"Режим: {volume} | Глубина: {depth}")
+    result.append("")
+
+    current_len = 0
+    cards_added = 0
+
+    # Порядок приоритета
+    priority = ["characters", "events", "locations", "chapters", "world"]
+
+    for table_key in priority:
+        if table_key not in selected_tables:
+            continue
+        table_id = project["tables"].get(table_key)
+        if not table_id:
+            continue
+
+        rows = get_rows(table_id)
+
+        # Простое ограничение по глубине (пока количественное)
+        if table_key == "events":
+            if depth == "arcs":
+                rows = rows[:6]
+            elif depth == "chapters":
+                rows = rows[:14]
+            else:
+                rows = rows[:30]
+        else:
+            rows = rows[:20]
+
+        section = [f"\n## {table_key.upper()} ({len(rows)} карточек)\n"]
+        section_len = sum(len(s) for s in section)
+
         for row in rows:
-            card = get_card(row["id"])
-            result.append(f"### {card['title']}\n{card['body']}\n")
-    
+            if current_len + section_len > limit:
+                break
+            try:
+                card = get_card(row["id"])
+                block = f"### {card['title']}\n{card['body']}\n\n"
+                if current_len + len(block) > limit:
+                    result.append("\n--- Обрезано по лимиту объёма ---\n")
+                    break
+                section.append(block)
+                current_len += len(block)
+                cards_added += 1
+            except Exception as e:
+                section.append(f"### {row['title']}\n[ошибка загрузки: {e}]\n\n")
+
+        result.extend(section)
+        if current_len >= limit:
+            break
+
     text = "\n".join(result)
+    filename = f"slice_{project_key}_{datetime.now().strftime('%Y%m%d_%H%M')}.md"
+
     return Response(
         text,
-        mimetype="text/markdown",headers={"Content-Disposition": "attachment; filename=slice.md"}
+        mimetype="text/markdown",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
-
