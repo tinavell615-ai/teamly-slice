@@ -953,10 +953,8 @@ def apply_delta(delta_text: str, project_key: str = "burevestnik") -> dict:
 
         try:
             if effective == "создать":
-                # Сначала создаём без связей (binding ломает article_create)
-                plain = {k: v for k, v in act["properties"].items() if not _is_relation_label(k)}
-                rels  = {k: v for k, v in act["properties"].items() if _is_relation_label(k)}
-                result = create_article_in_table(table_id, title, plain, project_key, resolver_data, table_key)
+                # Связи идут вместе с create (формат [{id}] уже выставлен в build_properties_payload)
+                result = create_article_in_table(table_id, title, act["properties"], project_key, resolver_data, table_key)
                 if not result["ok"]:
                     report["failed"].append({
                         "title": title,
@@ -965,16 +963,6 @@ def apply_delta(delta_text: str, project_key: str = "burevestnik") -> dict:
                     })
                     continue
                 article_id = result["id"]
-                # Связи — отдельным update
-                if rels:
-                    ur = update_article_properties(table_id, article_id, rels, title, resolver_data, table_key)
-                    if not ur["ok"]:
-                        report["failed"].append({
-                            "title": title,
-                            "table": act.get("table_display"),
-                            "error": f"Карточка создана, связи не записались: {ur['error']}"
-                        })
-                        continue
                 # тело
                 if act.get("body"):
                     space_id = table_id  # в умной таблице spaceId = tableId
