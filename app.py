@@ -1762,5 +1762,74 @@ def status():
 
 start_proactive_refresh()
 
+
+@app.route("/debug/props/<article_id>")
+def debug_props(article_id):
+    """Сырые свойства карточки + schema таблицы События."""
+    try:
+        card = api("/api/v1/wiki/ql/article", {
+            "query": {
+                "__filter": {"id": article_id},
+                "id": True,
+                "title": True,
+                "properties": {"properties": True},
+                "schemaProperties": True
+            }
+        })
+        # schema таблицы
+        table_id = PROJECTS["burevestnik"]["tables"]["events"]
+        schema = api("/api/v1/ql/content-database/content", {
+            "query": {
+                "__filter": {"contentDatabaseId": table_id},
+                "schemaProperties": {
+                    "id": True, "name": True, "type": True, "code": True,
+                    "format": True, "options": True, "propertyId": True
+                }
+            }
+        })
+        import json
+        return f"<pre>{json.dumps({'card': card, 'schema_sample': schema}, ensure_ascii=False, indent=2)[:15000]}</pre>"
+    except Exception as e:
+        import traceback
+        return f"<pre>{e}\n{traceback.format_exc()}</pre>", 500
+
+
+
+@app.route("/debug/schema/<table_key>")
+def debug_schema(table_key):
+    """Схема свойств таблицы."""
+    table_id = PROJECTS["burevestnik"]["tables"].get(table_key)
+    if not table_id:
+        return f"Unknown table: {table_key}", 404
+    try:
+        data = api("/api/v1/ql/content-database/content", {
+            "query": {
+                "__filter": {"contentDatabaseId": table_id},
+                "schemaProperties": {
+                    "id": True, "name": True, "type": True, "code": True,
+                    "format": True, "options": True, "propertyId": True,
+                    "protected": True, "hide": True
+                }
+            }
+        })
+        import json
+        props = data.get("schemaProperties", [])
+        # compact view
+        compact = []
+        for p in props:
+            compact.append({
+                "name": p.get("name"),
+                "code": p.get("code"),
+                "type": p.get("type"),
+                "format": p.get("format"),
+                "options": p.get("options"),
+                "propertyId": p.get("propertyId")
+            })
+        return f"<pre>{json.dumps(compact, ensure_ascii=False, indent=2)}</pre>"
+    except Exception as e:
+        import traceback
+        return f"<pre>{e}\n{traceback.format_exc()}</pre>", 500
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
