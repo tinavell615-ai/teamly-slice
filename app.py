@@ -827,79 +827,51 @@ def update_article_properties(table_id: str, article_id: str, properties: dict, 
                                resolver_data: dict | None = None, table_key: str = "") -> dict:
     """
     Обновляет свойства существующей карточки.
-    command/execute с article_update* не работает — пробуем прямые эндпоинты.
+    Живой формат Teamly (перехват UI 25.07.2026):
+    code: property_update
+    entity: {spaceId, articleId}
+    operation: {method: update, code, value}
+    Каждое свойство — отдельный вызов.
     """
     prop_list = build_properties_payload(properties, resolver_data, table_key)
     if not prop_list:
         return {"ok": True, "error": None}
 
-    last_err = None
-    token = get_token()
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "X-Account-Slug": SLUG,
-        "Content-Type": "application/json"
-    }
-
-    attempts = []
-
-    # 1. command/execute — article_update с properties
-    attempts.append(("cmd/article_update", "POST",
-        f"{CLUSTER}/api/v1/wiki/properties/command/execute",
-        {"code": "article_update", "payload": {"entity": {"spaceId": table_id, "id": article_id, "properties": prop_list}}}))
-
-    # 2. PUT article
-    attempts.append(("PUT article", "PUT",
-        f"{CLUSTER}/api/v1/wiki/spaces/{table_id}/articles/{article_id}",
-        {"properties": prop_list}))
-
-    # 3. PATCH article
-    attempts.append(("PATCH article", "PATCH",
-        f"{CLUSTER}/api/v1/wiki/spaces/{table_id}/articles/{article_id}",
-        {"properties": prop_list}))
-
-    # 4. POST properties на статью
-    attempts.append(("POST article/properties", "POST",
-        f"{CLUSTER}/api/v1/wiki/spaces/{table_id}/articles/{article_id}/properties",
-        {"properties": prop_list}))
-
-    # 5. command с propertyId вместо code (если есть в schema — пока code)
-    attempts.append(("cmd/set_properties", "POST",
-        f"{CLUSTER}/api/v1/wiki/properties/command/execute",
-        {"code": "set_properties", "payload": {"spaceId": table_id, "articleId": article_id, "properties": prop_list}}))
-
-    # 6. По одному свойству через command article_create-style но method=set
-    # (иногда API принимает частичный update)
+    errors = []
+    ok_count = 0
     for p in prop_list:
-        attempts.append((f"cmd/single {p.get('code')}", "POST",
-            f"{CLUSTER}/api/v1/wiki/properties/command/execute",
-            {"code": "article_update", "payload": {"entity": {
-                "spaceId": table_id, "id": article_id,
-                "properties": [{**p, "method": "set"}]
-            }}}))
-
-    import requests as req
-    for name, method, url, body in attempts:
+        payload = {
+            "code": "property_update",
+            "internal": False,
+            "payload": {
+                "entity": {
+                    "spaceId": table_id,
+                    "articleId": article_id
+                },
+                "operation": {
+                    "method": "update",
+                    "code": p["code"],
+                    "value": p["value"]
+                }
+            }
+        }
         try:
-            if method == "POST":
-                r = req.post(url, headers=headers, json=body, timeout=30)
-            elif method == "PUT":
-                r = req.put(url, headers=headers, json=body, timeout=30)
-            else:
-                r = req.patch(url, headers=headers, json=body, timeout=30)
-            print(f"[write] update {name}: {r.status_code} body_len={len(r.text)}")
-            if r.status_code in (200, 201, 204):
-                _log_write("update_props", title or article_id, table_id, True, name)
-                return {"ok": True, "error": None, "raw": r.text[:300]}
-            last_err = f"{name}: {r.status_code} {r.text[:200]}"
-            print(f"[write] update {name} fail: {r.text[:150]}")
+            result = api("/api/v1/wiki/properties/command/execute", payload)
+            print(f"[write] property_update {p['code']} OK: {str(result)[:150]}")
+            ok_count += 1
         except Exception as e:
-            last_err = f"{name}: {e}"
-            print(f"[write] update {name} exc: {e}")
-            continue
+            err = str(e)
+            print(f"[write] property_update {p['code']} FAIL: {err[:200]}")
+            errors.append(f"{p['code']}: {err[:120]}")
 
-    _log_write("update_props", title or article_id, table_id, False, last_err or "")
-    return {"ok": False, "error": last_err}
+    if ok_count == len(prop_list):
+        _log_write("update_props", title or article_id, table_id, True, f"ok={ok_count}")
+        return {"ok": True, "error": None}
+    if ok_count > 0:
+        _log_write("update_props", title or article_id, table_id, True, f"partial ok={ok_count} err={errors}")
+        return {"ok": True, "error": f"частично: {'; '.join(errors)}"}
+    _log_write("update_props", title or article_id, table_id, False, str(errors))
+    return {"ok": False, "error": "; ".join(errors)}
 
 
 
