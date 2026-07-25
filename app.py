@@ -222,6 +222,8 @@ def api(endpoint, payload):
         timeout=60
     )
     if r.status_code != 200:
+        if r.status_code == 401:
+            print("[API] 401 Unauthorized — токен истёк или refresh не удался")
         raise Exception(f"API {r.status_code}: {r.text[:300]}")
     return r.json()
 
@@ -230,7 +232,7 @@ def extract_text(editor):
         return ""
     try:
         doc = json.loads(editor)
-    except:
+    except Exception:
         return ""
     def walk(n):
         if isinstance(n, dict):
@@ -544,8 +546,9 @@ def slice():
                     break
                 result.append(block)
                 current_len += len(block)
-            except:
-                pass
+            except Exception as e:
+                print(f"[slice] Ошибка загрузки карточки {row.get('id')}: {e}")
+                result.append(f"### [ошибка {row.get('id')}]: {e}\n\n")
 
     text = "\n".join(result)
     filename = f"slice_{project_key}_{datetime.now().strftime('%Y%m%d_%H%M')}.md"
