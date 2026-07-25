@@ -79,6 +79,24 @@ VOLUME_LIMITS = {
     "full": 999999
 }
 
+
+def nav_html(active: str = "") -> str:
+    """Простая навигация между срезом и DELTA."""
+    items = [
+        ("/", "Срез", "slice"),
+        ("/delta", "Запись (DELTA)", "delta"),
+        ("/status", "Статус", "status"),
+    ]
+    parts = ['<nav style="font-family:system-ui;padding:12px 20px;background:#1e1e2e;margin-bottom:24px;">']
+    for href, label, key in items:
+        if key == active:
+            parts.append(f'<a href="{href}" style="color:#fff;font-weight:600;margin-right:20px;text-decoration:none;border-bottom:2px solid #7c3aed;padding-bottom:4px;">{label}</a>')
+        else:
+            parts.append(f'<a href="{href}" style="color:#a1a1aa;margin-right:20px;text-decoration:none;">{label}</a>')
+    parts.append('</nav>')
+    return "".join(parts)
+
+
 # ===================== NAME RESOLVER (Task C) =====================
 import re
 import uuid
@@ -514,7 +532,8 @@ def render_preview_html(preview: dict, delta_text: str) -> str:
     import html as html_mod
     esc = html_mod.escape
 
-    parts = ['<div style="font-family: system-ui, sans-serif; max-width: 900px; margin: 20px auto; padding: 20px;">']
+    parts = [nav_html("delta")]
+    parts.append('<div style="font-family: system-ui, sans-serif; max-width: 900px; margin: 20px auto; padding: 20px;">')
     parts.append('<h2>Предпросмотр изменений</h2>')
 
     if preview["creates"]:
@@ -605,28 +624,13 @@ def _get_table_id(project_key: str, table_key: str) -> str | None:
         return None
     return project["tables"].get(table_key)
 
-def create_article_in_table(table_id: str, title: str, properties: dict, project_key: str = "burevestnik") -> dict:
+def create_article_in_table(table_id: str, title: str, properties: dict, project_key: str = "burevestnik", resolver_data: dict | None = None, table_key: str = "") -> dict:
     """
     Создаёт строку (статью) в умной таблице.
     Возвращает {"ok": bool, "id": str|None, "error": str|None}
     """
     new_id = str(uuid.uuid4())
-    prop_list = []
-    for label, value in properties.items():
-        code = LABEL_TO_CODE.get(label)
-        if not code:
-            for lab, c in LABEL_TO_CODE.items():
-                if lab.lower() == label.lower():
-                    code = c
-                    break
-        if code:
-            prop_list.append({
-                "method": "add",
-                "code": code,
-                "value": value
-            })
-        else:
-            print(f"[write] Нет code для свойства «{label}» — пропускаю")
+    prop_list = build_properties_payload(properties, resolver_data, table_key)
 
     # Пробуем несколько вариантов payload — Teamly требует title
     payloads_to_try = [
@@ -682,29 +686,78 @@ def create_article_in_table(table_id: str, title: str, properties: dict, project
     _log_write("create", title, table_id, False, last_err or "all attempts failed")
     return {"ok": False, "id": None, "error": last_err or "all attempts failed"}
 
-def update_article_properties(table_id: str, article_id: str, properties: dict, title: str = "") -> dict:
+def _resolve_prop_code(label: str) -> str | None:
+    code = LABEL_TO_CODE.get(label)
+    if code:
+        return code
+    for lab, c in LABEL_TO_CODE.items():
+        if lab.lower() == label.lower():
+            return c
+    return None
+
+def _is_relation_label(label: str) -> bool:
+    low = label.lower()
+    return any(x in low for x in (
+        "участник", "pov", "локац", "родител", "связан", "глав", "событи", "персонаж"
+    ))
+
+def build_properties_payload(properties: dict, resolver_data: dict | None = None, table_key: str = "") -> list:
     """
-    Обновляет свойства существующей карточки.
-    Пока используем тот же command/execute (точный code для set value может отличаться —
-    при живом тесте уточним). Пока пробуем article_update / property_set если упадёт.
+    Формирует список properties для command/execute.
+    Для связей резолвит имена → id.
     """
     prop_list = []
     for label, value in properties.items():
-        code = LABEL_TO_CODE.get(label)
+        code = _resolve_prop_code(label)
         if not code:
-            for lab, c in LABEL_TO_CODE.items():
-                if lab.lower() == label.lower():
-                    code = c
-                    break
-        if code:
-            prop_list.append({
-                "method": "set",          # предположение; может быть "update" / "add"
-                "code": code,
-                "value": value
-            })
+            print(f"[write] Нет code для «{label}» — пропускаю")
+            continue
 
-    # Пробуем наиболее вероятный code
-    for try_code in ("article_update", "property_value_set", "schema_property_update"):
+        # Связи: превращаем имена в список id
+        if _is_relation_label(label) and resolver_data is not None:
+            names = [n.strip() for n in re.split(r'[,;]', str(value)) if n.strip()]
+            ids = []
+            # определяем таблицу связи
+            low = label.lower()
+            if any(x in low for x in ("участник", "pov", "персонаж", "связанные персонажи")):
+                rel_table = "characters"
+            elif any(x in low for x in ("локац", "родительская локация")):
+                rel_table = "locations"
+            elif "родител" in low and "событ" in low:
+                rel_table = "events"
+            elif "глав" in low:
+                rel_table = "chapters"
+            else:
+                rel_table = table_key or "events"
+            for n in names:
+                clean = re.sub(r'\s*[\(\[\{].*?[\)\]\}]\s*', '', n).strip()
+                r = resolve_name(clean, rel_table, resolver_data)
+                if r["status"] == "ok":
+                    ids.append(r["id"])
+                else:
+                    print(f"[write] связь «{n}» не резолвнута: {r.get('question')}")
+            # Teamly relation value = list of ids or list of {id: ...}
+            value = ids
+
+        prop_list.append({
+            "method": "add",
+            "code": code,
+            "value": value
+        })
+    return prop_list
+
+def update_article_properties(table_id: str, article_id: str, properties: dict, title: str = "",
+                               resolver_data: dict | None = None, table_key: str = "") -> dict:
+    """
+    Обновляет свойства существующей карточки (включая связи).
+    """
+    prop_list = build_properties_payload(properties, resolver_data, table_key)
+    if not prop_list:
+        return {"ok": True, "error": None}
+
+    last_err = None
+    for try_code in ("article_update", "property_value_set", "article_create"):
+        # для article_create при обновлении тоже пробуем — иногда API так принимает
         payload = {
             "code": try_code,
             "payload": {
@@ -717,12 +770,14 @@ def update_article_properties(table_id: str, article_id: str, properties: dict, 
         }
         try:
             result = api("/api/v1/wiki/properties/command/execute", payload)
+            print(f"[write] update_props via {try_code}: {str(result)[:200]}")
             _log_write("update_props", title or article_id, table_id, True, f"code={try_code}")
             return {"ok": True, "error": None, "raw": result}
         except Exception as e:
             last_err = str(e)
+            print(f"[write] update_props {try_code} failed: {e}")
             continue
-    _log_write("update_props", title or article_id, table_id, False, last_err)
+    _log_write("update_props", title or article_id, table_id, False, last_err or "")
     return {"ok": False, "error": last_err}
 
 def append_body(space_id: str, article_id: str, text: str, title: str = "") -> dict:
@@ -807,7 +862,7 @@ def apply_delta(delta_text: str, project_key: str = "burevestnik") -> dict:
 
         try:
             if effective == "создать":
-                result = create_article_in_table(table_id, title, act["properties"], project_key)
+                result = create_article_in_table(table_id, title, act["properties"], project_key, resolver_data, table_key)
                 if not result["ok"]:
                     report["failed"].append({
                         "title": title,
@@ -848,7 +903,7 @@ def apply_delta(delta_text: str, project_key: str = "burevestnik") -> dict:
                 article_id = res_name["id"]
                 # свойства
                 if act["properties"]:
-                    ur = update_article_properties(table_id, article_id, act["properties"], title)
+                    ur = update_article_properties(table_id, article_id, act["properties"], title, resolver_data, table_key)
                     if not ur["ok"]:
                         report["failed"].append({
                             "title": title,
@@ -1087,21 +1142,22 @@ def _proactive_loop():
 def delta_page():
     """Страница ввода DELTA и показа предпросмотра."""
     if request.method == "GET":
-        return """
+        return f"""
 <!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
 <title>DELTA to Teamly</title>
 <style>
-body { font-family: system-ui, sans-serif; max-width: 900px; margin: 40px auto; padding: 0 20px; }
-textarea { width: 100%; height: 420px; font-family: ui-monospace, monospace; font-size: 13px; padding: 12px; border: 1px solid #ccc; border-radius: 8px; }
-button { margin-top: 16px; padding: 12px 28px; font-size: 16px; background: #4f46e5; color: white; border: none; border-radius: 8px; cursor: pointer; }
-h1 { margin-bottom: 8px; }
-.hint { color: #666; font-size: 0.9rem; margin-bottom: 20px; }
+body {{ font-family: system-ui, sans-serif; max-width: 900px; margin: 0 auto; padding: 0 20px 40px; }}
+textarea {{ width: 100%; height: 420px; font-family: ui-monospace, monospace; font-size: 13px; padding: 12px; border: 1px solid #ccc; border-radius: 8px; }}
+button {{ margin-top: 16px; padding: 12px 28px; font-size: 16px; background: #4f46e5; color: white; border: none; border-radius: 8px; cursor: pointer; }}
+h1 {{ margin-bottom: 8px; }}
+.hint {{ color: #666; font-size: 0.9rem; margin-bottom: 20px; }}
 </style>
 </head>
 <body>
+{nav_html("delta")}
 <h1>Обратный канал — DELTA</h1>
 <p class="hint">Вставь блок === DELTA === ... === КОНЕЦ DELTA === и нажми «Показать предпросмотр».<br>
 Ничего не записывается в Teamly до явного подтверждения.</p>
@@ -1110,7 +1166,6 @@ h1 { margin-bottom: 8px; }
 <br>
 <button type="submit">Показать предпросмотр</button>
 </form>
-<p style="margin-top:30px;"><a href="/">← К срезу</a></p>
 </body>
 </html>
 """
@@ -1149,7 +1204,8 @@ def delta_apply():
     # HTML-отчёт
     import html as html_mod
     esc = html_mod.escape
-    parts = ['<div style="font-family:system-ui;max-width:800px;margin:40px auto;padding:20px;">']
+    parts = [nav_html("delta")]
+    parts.append('<div style="font-family:system-ui;max-width:800px;margin:40px auto;padding:20px;">')
     parts.append('<h2>Результат применения</h2>')
 
     if report["applied"]:
@@ -1482,6 +1538,7 @@ def index():
     </style>
 </head>
 <body>
+""" + nav_html("slice") + """
     <h1>Срез базы Teamly</h1>
     <p class="hint">Выбери арки/главы — система подтянет то, что было до них</p>
 
