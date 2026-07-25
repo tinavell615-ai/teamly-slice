@@ -711,11 +711,29 @@ def create_article_in_table(table_id: str, title: str, properties: dict, project
     _log_write("create", title, table_id, False, last_err or "all attempts failed")
     return {"ok": False, "id": None, "error": last_err or "all attempts failed"}
 
+PROP_ALIASES = {
+    "локация": "Связанные локации",
+    "локации": "Связанные локации",
+    "связанные локации": "Связанные локации",
+    "участники": "Персонажи",
+    "персонаж": "Персонажи",
+    "персонажи": "Персонажи",
+    "связанные персонажи": "Связанные персонажи",
+    "родитель": "Родительское событие",
+    "родительское событие": "Родительское событие",
+    "узловой": "Узловой?",
+    "эпоха": "Эпоха / Слой",
+    "слой": "Эпоха / Слой",
+}
+
 def _resolve_prop_code(label: str) -> str | None:
+    canon = PROP_ALIASES.get(label.lower().rstrip("?").strip(), label)
+    code = LABEL_TO_CODE.get(canon)
+    if code:
+        return code
     code = LABEL_TO_CODE.get(label)
     if code:
         return code
-    # без знака вопроса / пробелов
     norm = label.lower().rstrip("?").strip()
     for lab, c in LABEL_TO_CODE.items():
         if lab.lower().rstrip("?").strip() == norm:
