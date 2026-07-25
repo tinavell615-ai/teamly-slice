@@ -429,18 +429,22 @@ def format_card(card, id_to_title):
 
 
 def get_chapters_for_select(table_id):
-    """Список глав/арок для чекбоксов."""
-    try:
-        data = api("/api/v1/ql/content-database/content", {
-            "query": {
-                "__filter": {"contentDatabaseId": table_id},
-                "content": {"article": {"id": True, "title": True}, "hasNested": True}
-            }
-        })
-        return [{"id": i["article"]["id"], "title": i["article"].get("title", "")} for i in data.get("content", [])]
-    except Exception as e:
-        print(f"[index] chapters error: {e}")
-        return []
+    """Список глав/арок для чекбоксов. 3 попытки."""
+    for attempt in range(3):
+        try:
+            data = api("/api/v1/ql/content-database/content", {
+                "query": {
+                    "__filter": {"contentDatabaseId": table_id},
+                    "content": {"article": {"id": True, "title": True}, "hasNested": True}
+                }
+            })
+            rows = [{"id": i["article"]["id"], "title": i["article"].get("title", "")} for i in data.get("content", [])]
+            print(f"[index] chapters loaded: {len(rows)}")
+            return rows
+        except Exception as e:
+            print(f"[index] chapters attempt {attempt+1}: {e}")
+            time.sleep(2)
+    return []
 
 def get_all_events(table_id):
     """Получаем все события + пытаемся вытащить родителя"""
