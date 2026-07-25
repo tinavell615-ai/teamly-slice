@@ -111,6 +111,7 @@ def nav_html(active: str = "") -> str:
         ("/", "Срез", "slice"),
         ("/delta", "Запись (DELTA)", "delta"),
         ("/delta/bulk", "Массовая", "bulk"),
+        ("/delta/jobs", "Журнал", "jobs"),
         ("/status", "Статус", "status"),
     ]
     parts = ['<nav style="font-family:system-ui;padding:12px 20px;background:#1e1e2e;margin-bottom:24px;">']
@@ -1241,12 +1242,103 @@ from datetime import datetime, timezone
 JOBS = {}
 JOBS_LOCK = threading.Lock()
 THROTTLE_SEC = 0.08  # ~12 req/s, устойчивость без долбёжки
+JOB_KEY_PREFIX = "bulk_job:"
+JOB_INDEX_KEY = "bulk_job_index"
+JOB_TTL_SEC = 60 * 60 * 24 * 7  # 7 дней
+
+def _job_public(job: dict) -> dict:
+    """Сериализуемое состояние без тяжёлых pass1/pass2 списков действий."""
+    return {
+        "id": job["id"],
+        "status": job["status"],
+        "created_at": job.get("created_at"),
+        "total": job.get("total", 0),
+        "done": job.get("done", 0),
+        "pass2_done": job.get("pass2_done", 0),
+        "errors": job.get("errors", [])[:50],
+        "log": job.get("log", [])[-100:],
+        "summary": job.get("summary", {}),
+        "estimate": job.get("estimate", {}),
+        "fatal": job.get("fatal"),
+        "cancel": job.get("cancel", False),
+    }
+
+def _upstash_job_set(job: dict):
+    if not UPSTASH_REDIS_REST_URL or not UPSTASH_REDIS_REST_TOKEN:
+        return
+    try:
+        import json as _json, urllib.parse
+        payload = _job_public(job)
+        # не храним pass1/pass2 в redis — только прогресс
+        raw = _json.dumps(payload, ensure_ascii=False)
+        encoded = urllib.parse.quote(raw, safe="")
+        key = JOB_KEY_PREFIX + job["id"]
+        r = requests.post(
+            f"{UPSTASH_REDIS_REST_URL}/set/{key}/{encoded}/EX/{JOB_TTL_SEC}",
+            headers={"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"},
+            timeout=10,
+        )
+        if r.status_code not in (200, 201):
+            print(f"[job] upstash set fail: {r.status_code} {r.text[:150]}")
+        # index: keep last 30 ids
+        requests.post(
+            f"{UPSTASH_REDIS_REST_URL}/lpush/{JOB_INDEX_KEY}/{job['id']}",
+            headers={"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"},
+            timeout=10,
+        )
+        requests.post(
+            f"{UPSTASH_REDIS_REST_URL}/ltrim/{JOB_INDEX_KEY}/0/29",
+            headers={"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"},
+            timeout=10,
+        )
+    except Exception as e:
+        print(f"[job] upstash set exc: {e}")
+
+def _upstash_job_get(job_id: str) -> dict | None:
+    if not UPSTASH_REDIS_REST_URL or not UPSTASH_REDIS_REST_TOKEN:
+        return None
+    try:
+        import json as _json
+        r = requests.get(
+            f"{UPSTASH_REDIS_REST_URL}/get/{JOB_KEY_PREFIX}{job_id}",
+            headers={"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return None
+        data = r.json().get("result")
+        if not data:
+            return None
+        if isinstance(data, str):
+            return _json.loads(data)
+        return data
+    except Exception as e:
+        print(f"[job] upstash get exc: {e}")
+        return None
+
+def _upstash_job_list() -> list:
+    if not UPSTASH_REDIS_REST_URL or not UPSTASH_REDIS_REST_TOKEN:
+        return []
+    try:
+        r = requests.get(
+            f"{UPSTASH_REDIS_REST_URL}/lrange/{JOB_INDEX_KEY}/0/19",
+            headers={"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return []
+        return r.json().get("result") or []
+    except Exception:
+        return []
 
 def _job_log(job, msg):
     ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
     line = f"[{ts}] {msg}"
     job["log"].append(line)
     print(f"[bulk {job['id'][:8]}] {msg}")
+    # периодически пишем в Upstash (каждые ~5 строк или на финальных статусах)
+    if len(job["log"]) % 5 == 0 or job.get("status") in ("done", "error", "cancelled", "pass2"):
+        _upstash_job_set(job)
 
 def split_two_pass(actions: list) -> tuple:
     """
@@ -1428,6 +1520,7 @@ def run_bulk_job(job_id: str):
 
         job["status"] = "done"
         _job_log(job, f"Готово. ошибок: {len(job['errors'])}")
+        _upstash_job_set(job)
     except Exception as e:
         job["status"] = "error"
         job["fatal"] = str(e)
@@ -1478,6 +1571,7 @@ def start_bulk_job(delta_text: str, tables_filter: list | None = None,
     }
     with JOBS_LOCK:
         JOBS[job_id] = job
+    _upstash_job_set(job)
     t = threading.Thread(target=run_bulk_job, args=(job_id,), daemon=True)
     t.start()
     return job
@@ -2305,7 +2399,9 @@ def delta_job_page(job_id):
     with JOBS_LOCK:
         job = JOBS.get(job_id)
     if not job:
-        return "Job не найден (сервер мог перезапуститься — журнал in-memory)", 404
+        job = _upstash_job_get(job_id)
+    if not job:
+        return "Job не найден", 404
     total = max(job["total"], 1)
     pct = int(100 * job["done"] / total)
     errs = "".join(f"<li>{e.get('title','?')}: {e.get('error','')}</li>" for e in job["errors"][:30])
@@ -2337,6 +2433,8 @@ def api_job(job_id):
     with JOBS_LOCK:
         job = JOBS.get(job_id)
     if not job:
+        job = _upstash_job_get(job_id)
+    if not job:
         return {"error": "not found"}, 404
     return {
         "id": job["id"],
@@ -2346,6 +2444,44 @@ def api_job(job_id):
         "errors": len(job["errors"]),
         "log_tail": job["log"][-10:],
     }
+
+
+
+@app.route("/delta/jobs")
+def delta_jobs_list():
+    ids = _upstash_job_list()
+    # merge with in-memory
+    with JOBS_LOCK:
+        mem_ids = list(JOBS.keys())
+    all_ids = []
+    seen = set()
+    for i in mem_ids + ids:
+        if i not in seen:
+            all_ids.append(i)
+            seen.add(i)
+    rows = []
+    for jid in all_ids[:20]:
+        with JOBS_LOCK:
+            j = JOBS.get(jid)
+        if not j:
+            j = _upstash_job_get(jid)
+        if not j:
+            continue
+        rows.append(
+            f'<tr><td><a href="/delta/job/{j["id"]}">{j["id"][:8]}…</a></td>'
+            f'<td>{j.get("status")}</td><td>{j.get("done",0)}/{j.get("total",0)}</td>'
+            f'<td>{len(j.get("errors") or [])}</td><td>{j.get("created_at","")}</td></tr>'
+        )
+    table = "".join(rows) or "<tr><td colspan=5>Пока нет задач</td></tr>"
+    return f"""<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8"><title>Журнал jobs</title>
+<style>body{{font-family:system-ui;max-width:900px;margin:0 auto;padding:0 20px 40px}}
+table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #ddd;padding:8px}}</style></head>
+<body>{nav_html("delta")}
+<h1>Журнал массовых задач</h1>
+<table><tr><th>ID</th><th>Статус</th><th>Прогресс</th><th>Ошибки</th><th>Создан</th></tr>
+{table}</table>
+<p><a href="/delta/bulk">← Массовая запись</a></p>
+</body></html>"""
 
 
 if __name__ == "__main__":
