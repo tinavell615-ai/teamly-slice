@@ -2245,20 +2245,8 @@ def delta_bulk_preview():
         except Exception:
             pass
 
-        rows = "".join(
-            f"<tr><td>{html_escape(t)}</td><td>{v['create']}</td><td>{v['update']}</td></tr>"
-            for t, v in summary.items()
-        )
-        warn_html = ""
-        if warnings:
-            warn_html = "<h3 style='color:#b45309'>Предупреждения</h3><ul>" + \
-                "".join(f"<li>{html_escape(str(w))}</li>" for w in warnings[:50]) + "</ul>"
-
-        tables_hidden = "".join(f'<input type="hidden" name="tables" value="{html_escape(t)}">' for t in tables)
-        import html as H
-        # use manual escape
         def esc(s):
-            return str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+            return str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;")
 
         rows = "".join(
             f"<tr><td>{esc(t)}</td><td>{v['create']}</td><td>{v['update']}</td></tr>"
