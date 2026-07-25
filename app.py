@@ -640,22 +640,24 @@ def slice():
     # Определяем, какие события включать
     to_include = set()
 
-    # Если выбраны главы — резолвим их «Связанные события»
+    # Если выбраны главы — резолвим ВСЕ их relation, которые указывают на события
     if selected_chapter_ids:
+        print(f"[slice] Резолв {len(selected_chapter_ids)} глав...")
         for chid in selected_chapter_ids:
             try:
                 card = get_card_full(chid)
                 props = card.get("properties") or {}
+                found = 0
                 for k, v in props.items():
-                    label = PROPERTY_LABELS.get(k, k)
-                    if "событ" in label.lower() or k in ("xe2X", "8iC3", "eXYm", "yB3V"):
-                        resolved_ids = []
-                        if isinstance(v, list):
-                            for item in v:
-                                if isinstance(item, dict) and "id" in item:
-                                    resolved_ids.append(item["id"])
-                        for eid in resolved_ids:
-                            selected_event_ids.append(eid)
+                    if not isinstance(v, list):
+                        continue
+                    for item in v:
+                        if isinstance(item, dict) and "id" in item:
+                            eid = item["id"]
+                            if eid in by_id:  # это событие
+                                selected_event_ids.append(eid)
+                                found += 1
+                print(f"[slice] Глава {card.get('title', chid)} → {found} событий")
             except Exception as e:
                 print(f"[slice] Ошибка резолва главы {chid}: {e}")
 
