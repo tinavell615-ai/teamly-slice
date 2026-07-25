@@ -1665,30 +1665,36 @@ try:
 except ImportError:
     provision_space = None
 
-CONTAINER_ID = "6aea92ec-e669-436f-8c5f-8c282eae0355"  # из разведки 26.07.2026
+# Из успешного создания таблицы внутри пространства, созданного через API (26.07)
+KNOWN_SPACE_ID = "846990cf-487f-4650-9cf1-f396492d2e17"
+KNOWN_PARENT_ID = "b35e2c9c-ea8e-493c-a8ed-ac3c9b87c45a"
 
 @app.route("/provision", methods=["GET"])
 def provision_endpoint():
     """
-    Тестовый провижининг пространства по схеме v7.
+    Тестовый провижининг таблиц в уже созданном пространстве v7.
     Требует ?confirm=1
-    Создаёт пространство «Детективный движок v7 — тест» + все таблицы + колонки + связи.
     """
     if request.args.get("confirm") != "1":
         return """
         <h2>Провижининг v7</h2>
-        <p>Это создаст <b>новое</b> пространство со всеми 12 таблицами схемы v7.</p>
+        <p>Создаст все 12 таблиц + колонки + связи <b>внутри уже существующего</b> пространства<br>
+        <code>846990cf-487f-4650-9cf1-f396492d2e17</code></p>
         <p>Для запуска добавь <code>?confirm=1</code> к URL.</p>
-        <p><a href="/provision?confirm=1">Запустить провижининг</a></p>
+        <p><a href="/provision?confirm=1">Запустить провижининг таблиц</a></p>
         <p><a href="/">← Назад</a></p>
         """, 200, {"Content-Type": "text/html; charset=utf-8"}
 
     if provision_space is None:
         return jsonify({"error": "provision_v7.py не найден"}), 500
 
-    title = "Детективный движок v7 — тест " + datetime.now().strftime("%H:%M")
     try:
-        result = provision_space(api, title, CONTAINER_ID)
+        result = provision_space(
+            api,
+            title="(reuse)",
+            parent_id=KNOWN_PARENT_ID,
+            existing_space_id=KNOWN_SPACE_ID,
+        )
         return jsonify(result), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500

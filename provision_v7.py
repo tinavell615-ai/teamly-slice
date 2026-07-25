@@ -102,19 +102,19 @@ def create_space(api_func, title: str, journal: ProvisionJournal) -> str | None:
 def create_table(
     api_func,
     space_id: str,
-    container_id: str,
+    parent_id: str,
     title: str,
     journal: ProvisionJournal,
     schema_key: str,
 ) -> str | None:
     """
     POST /api/v1/content-database
-    Возвращает contentDatabaseId (он же spaceId таблицы в терминах Teamly).
+    По разведке 26.07: containerId = space_id, parentId = внутренний id пространства.
     """
     payload = {
         "title": title,
-        "parentId": space_id,
-        "containerId": container_id,
+        "parentId": parent_id,
+        "containerId": space_id,
         "displayView": {
             "name": "Таблица",
             "type": "table",
@@ -300,14 +300,16 @@ def configure_rollup(
 def provision_space(
     api_func,
     title: str,
-    container_id: str,
+    parent_id: str | None = None,
+    existing_space_id: str | None = None,
     tables_filter: list[str] | None = None,
 ) -> dict:
     """
     Полный провижининг одного пространства по схеме v7.
 
     api_func — функция api(endpoint, payload) из app.
-    container_id — id контейнера (из разведки, обычно id списка пространств / аккаунта).
+    parent_id — внутренний parentId пространства (из разведки браузера).
+    existing_space_id — если задан, не создаём новое пространство, а используем это.
     tables_filter — если задан, создаём только эти ключи (иначе все).
 
     Возвращает journal.summary().
@@ -316,8 +318,17 @@ def provision_space(
     keys = tables_filter or CREATION_ORDER
 
     # 1. Пространство
-    space_id = create_space(api_func, title, journal)
-    if not space_id:
+    if existing_space_id:
+        space_id = existing_space_id
+        journal.created_space_id = space_id
+        journal.log("create_space", True, f"используем существующее {space_id}")
+    else:
+        space_id = create_space(api_func, title, journal)
+        if not space_id:
+            return journal.summary()
+
+    if not parent_id:
+        journal.log("create_table", False, "parent_id не передан — таблицы создать нельзя")
         return journal.summary()
 
     # 2. Таблицы + обычные колонки
@@ -327,7 +338,7 @@ def provision_space(
             continue
         tbl = SCHEMA[key]
         table_title = f"{tbl['emoji']} {tbl['title']}"
-        table_id = create_table(api_func, space_id, container_id, table_title, journal, key)
+        table_id = create_table(api_func, space_id, parent_id, table_title, journal, key)
         if not table_id:
             continue
 
