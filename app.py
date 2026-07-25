@@ -150,10 +150,7 @@ def _update_railway_refresh_token(new_refresh: str):
     try:
         mutation = """
         mutation($input: VariableUpsertInput!) {
-          variableUpsert(input: $input) {
-            id
-            name
-          }
+          variableUpsert(input: $input)
         }
         """
         variables = {
