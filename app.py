@@ -1,7 +1,9 @@
-from flask import Flask, request, Response
+from flask import Flask, request, Response, jsonify
 import requests
 import json
 import os
+import time
+import threading
 from datetime import datetime
 from collections import defaultdict
 
@@ -9,7 +11,8 @@ app = Flask(__name__)
 
 CLIENT_ID = os.environ.get("CLIENT_ID", "")
 CLIENT_SECRET = os.environ.get("CLIENT_SECRET", "")
-REFRESH_TOKEN = os.environ.get("REFRESH_TOKEN", "")
+INITIAL_REFRESH_TOKEN = os.environ.get("REFRESH_TOKEN", "")
+TOKENS_FILE = os.environ.get("TOKENS_FILE", "/tmp/teamly_tokens.json")
 SLUG = "tina-vell"
 CLUSTER = "https://app.teamly.ru"
 
@@ -32,12 +35,179 @@ VOLUME_LIMITS = {
     "full": 999999
 }
 
-access_token = None
-access_token_expires = 0
+# ===================== TOKEN SYSTEM (P0) =====================
+REFRESH_MARGIN_SEC = 15 * 60
+PROACTIVE_INTERVAL_SEC = 25 * 60
+
+_state = {
+    "access_token": None,
+    "refresh_token": None,
+    "access_token_expires_at": 0,
+    "refresh_token_expires_at": 0,
+    "last_refresh_at": None,
+    "last_refresh_ok": None,
+    "last_error": None,
+    "source": None,
+}
+_lock = threading.Lock()
+
+def _now():
+    return int(time.time())
+
+def _load_from_file():
+    try:
+        if not os.path.exists(TOKENS_FILE):
+            return False
+        with open(TOKENS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not data.get("access_token") or not data.get("refresh_token"):
+            return False
+        _state["access_token"] = data["access_token"]
+        _state["refresh_token"] = data["refresh_token"]
+        _state["access_token_expires_at"] = int(data.get("access_token_expires_at", 0))
+        _state["refresh_token_expires_at"] = int(data.get("refresh_token_expires_at", 0))
+        _state["last_refresh_at"] = data.get("last_refresh_at")
+        _state["last_refresh_ok"] = data.get("last_refresh_ok")
+        _state["source"] = "file"
+        print(f"[tokens] Загружено из {TOKENS_FILE}")
+        return True
+    except Exception as e:
+        print(f"[tokens] Не удалось прочитать {TOKENS_FILE}: {e}")
+        return False
+
+def _save_to_file():
+    try:
+        payload = {
+            "access_token": _state["access_token"],
+            "refresh_token": _state["refresh_token"],
+            "access_token_expires_at": _state["access_token_expires_at"],
+            "refresh_token_expires_at": _state["refresh_token_expires_at"],
+            "last_refresh_at": _state["last_refresh_at"],
+            "last_refresh_ok": _state["last_refresh_ok"],
+            "saved_at": _now(),
+        }
+        with open(TOKENS_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        print(f"[tokens] Сохранено в {TOKENS_FILE}")
+        return True
+    except Exception as e:
+        print(f"[tokens] НЕ удалось сохранить в {TOKENS_FILE}: {e}")
+        return False
+
+def _do_refresh():
+    refresh_token = _state["refresh_token"] or INITIAL_REFRESH_TOKEN
+    if not refresh_token:
+        _state["last_error"] = "Нет refresh_token"
+        _state["last_refresh_ok"] = False
+        print("[tokens] ОШИБКА: нет refresh_token")
+        return False
+    try:
+        r = requests.post(
+            f"{CLUSTER}/api/v1/auth/integration/refresh",
+            json={
+                "client_id": CLIENT_ID,
+                "client_secret": CLIENT_SECRET,
+                "refresh_token": refresh_token,
+            },
+            timeout=30,
+        )
+        if r.status_code != 200:
+            _state["last_error"] = f"HTTP {r.status_code}: {r.text[:400]}"
+            _state["last_refresh_ok"] = False
+            print(f"[tokens] ОШИБКА refresh: {_state['last_error']}")
+            return False
+        data = r.json()
+        new_access = data.get("access_token")
+        new_refresh = data.get("refresh_token")
+        exp = int(data.get("access_token_expires_at", _now() + 3600))
+        rexp = int(data.get("refresh_token_expires_at", 0))
+        if not new_access:
+            _state["last_error"] = "В ответе нет access_token"
+            _state["last_refresh_ok"] = False
+            return False
+        _state["access_token"] = new_access
+        if new_refresh:
+            _state["refresh_token"] = new_refresh
+            print("[tokens] Получен НОВЫЙ refresh_token (ротация)")
+        _state["access_token_expires_at"] = exp
+        _state["refresh_token_expires_at"] = rexp
+        _state["last_refresh_at"] = _now()
+        _state["last_refresh_ok"] = True
+        _state["last_error"] = None
+        _state["source"] = "refresh"
+        _save_to_file()
+        print("=" * 60)
+        print("[tokens] УСПЕШНЫЙ REFRESH")
+        print(f"expires_at = {exp} ({datetime.fromtimestamp(exp)})")
+        if new_refresh:
+            print("НОВЫЙ refresh_token (при рестарте контейнера обнови Variable):")
+            print(new_refresh)
+        print("=" * 60)
+        return True
+    except Exception as e:
+        _state["last_error"] = str(e)
+        _state["last_refresh_ok"] = False
+        print(f"[tokens] EXCEPTION при refresh: {e}")
+        return False
 
 def get_token():
-    # Временно используем access_token напрямую (refresh пока не работает)
-    return "eyJ0eXAiOiJKV1QiLCJhbGciOiJFZERTQSJ9.eyJqdGkiOiI2OTVmZjFiMmJlZmM5YmZlOWJmYmU0NjhkM2Y4MzRlZjA4OThjMDlkZDYzOTA1ZGM0MDUwYzI3YzRiODU2MDU5MGZmNmQ5MWU3ZDNmODQwMiIsImF1ZCI6ImVhNjVkMmUxLWRkMzEtNDQ0My1hOTAzLTZmMTBiODdmMDE5NCIsInN1YiI6IjkyMjQzZmQ2LTY3ZTEtNDlmNS1iNzc0LWY1MDJkZmM1M2QyMyIsImlhdCI6MTc4NDkxOTU5Ny43NTk4MywibmJmIjoxNzg0OTE5NTk3Ljc1OTgzMSwiZXhwIjoxNzg1MDkyMzk3Ljc0NzUzNywic2NvcGVzIjpbImV4dGVybmFsIl0sImFmaSI6IjUzNGI4MmI2LTBmNjktNDNkYS1hMGRhLWEzYWE3NTg0MzYzYyJ9.rAABvmD4u9gouQxWnJwngRKTZ0AtTMbHENXlZpCG-KP3vE6IgTSxgU49d-CEG4aUOgYPBM62zxOPGxZzv2uBCA"
+    with _lock:
+        if _state["access_token"] is None:
+            if not _load_from_file():
+                if INITIAL_REFRESH_TOKEN:
+                    _state["refresh_token"] = INITIAL_REFRESH_TOKEN
+                    _state["source"] = "env"
+                    print("[tokens] Стартуем с REFRESH_TOKEN из env")
+                else:
+                    raise Exception("Нет токенов: ни файла, ни REFRESH_TOKEN в env")
+        now = _now()
+        expires = _state["access_token_expires_at"]
+        if _state["access_token"] and expires > now + REFRESH_MARGIN_SEC:
+            return _state["access_token"]
+        print(f"[tokens] Токен истекает (осталось {max(0, expires - now)} сек) → refresh")
+        ok = _do_refresh()
+        if not ok:
+            raise Exception(f"Не удалось обновить токен: {_state['last_error']}")
+        return _state["access_token"]
+
+def get_status():
+    with _lock:
+        now = _now()
+        expires = _state["access_token_expires_at"]
+        remaining = max(0, expires - now) if expires else 0
+        return {
+            "ok": bool(_state["last_refresh_ok"]),
+            "source": _state["source"],
+            "access_token_expires_at": expires,
+            "access_token_expires_in_sec": remaining,
+            "access_token_expires_in_min": round(remaining / 60, 1),
+            "last_refresh_at": _state["last_refresh_at"],
+            "last_refresh_ok": _state["last_refresh_ok"],
+            "last_error": _state["last_error"],
+            "has_refresh_token": bool(_state["refresh_token"] or INITIAL_REFRESH_TOKEN),
+            "tokens_file": TOKENS_FILE,
+            "file_exists": os.path.exists(TOKENS_FILE),
+        }
+
+def _proactive_loop():
+    while True:
+        time.sleep(PROACTIVE_INTERVAL_SEC)
+        try:
+            with _lock:
+                now = _now()
+                expires = _state["access_token_expires_at"]
+                if expires and expires < now + 40 * 60:
+                    print("[tokens] Проактивный refresh по таймеру")
+                    _do_refresh()
+        except Exception as e:
+            print(f"[tokens] Ошибка в proactive loop: {e}")
+
+def start_proactive_refresh():
+    t = threading.Thread(target=_proactive_loop, daemon=True)
+    t.start()
+    print("[tokens] Проактивный refresh-поток запущен")
+
+# ===================== END TOKEN SYSTEM =====================
 
 def api(endpoint, payload):
     token = get_token()
@@ -381,6 +551,13 @@ def slice():
     filename = f"slice_{project_key}_{datetime.now().strftime('%Y%m%d_%H%M')}.md"
     return Response(text, mimetype="text/markdown",
                     headers={"Content-Disposition": f"attachment; filename={filename}"})
+
+
+@app.route("/status")
+def status():
+    return jsonify(get_status())
+
+start_proactive_refresh()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
