@@ -35,17 +35,19 @@ PROJECTS = {
 # Маппинг внутренних ID свойств Teamly → читаемые названия
 # Зафиксировано по реальному срезу 25.07.2026. Стабильно, как ID таблиц.
 PROPERTY_LABELS = {
-    # События
-    "Ik4p": "Участники",
-    "K3b5": "Участники",
-    "Vfxy": "Локация",
-    "nNmi": "Локация",
-    "4LZq": "ID",
+    # === События (актуально по schema 25.07.2026) ===
+    "lcVz": "Узловой?",
+    "K714": "Статус",
     "B4zM": "Хронопорядок",
-    "K714": "Эпоха/Слой",
-    "lcVz": "Статус",
-    "uHqz": "Узловой",
-    # Персонажи
+    "4LZq": "Эпоха / Слой",
+    "uHqz": "Источник",
+    "Ik4p": "Персонажи",
+    "K3b5": "Связанные персонажи",
+    "nNmi": "Локации",
+    "Vfxy": "Связанные локации",
+    "poqo": "Родительское событие",
+    "GVsw": "Главы / Части",
+    # === Персонажи (оставляем прежние, уточним отдельно) ===
     "QWXk": "Связи",
     "Y7ne": "Связи",
     "eXYm": "События",
@@ -58,7 +60,7 @@ PROPERTY_LABELS = {
     "MNDf": "Статус",
     "Mtec": "Слой",
     "pAOs": "Тип",
-    # Локации
+    # === Локации ===
     "747P": "Связанные персонажи",
     "8iC3": "Связанные события",
     "ZOKQ": "Связанные персонажи",
@@ -71,6 +73,29 @@ PROPERTY_LABELS = {
     "NcYD": "Слой",
     "ghta": "Родитель",
     "re5V": "Статус",
+}
+
+# Опции select-полей: label → {text_lower → option_id}
+# Актуально для таблицы События
+SELECT_OPTIONS = {
+    "Узловой?": {
+        "да": "065699cb-1056-4a2a-97de-d76dac77ec87",
+        "нет": "d40b53f8-4462-4dce-b10f-90161dc8ea3d",
+    },
+    "Статус": {
+        "закрыто": "b7d66dea-38dd-4aac-bc28-cdbc7fd1f0d0",
+        "зафиксировано": "c462d63c-052d-4f1e-83f7-3b5e84a2c681",
+    },
+    "Эпоха / Слой": {
+        "1948": "f72382d9-e0eb-47ab-9a53-e8df5ebbc0ad",
+        "1954": "1edfd476-a35d-4fe3-94ef-8f1d8a83cd6e",
+        "1955": "ac18f047-a2c6-4fe0-b908-c91b8f5d5609",
+        "1961": "6f518aad-a6f8-404b-a9a9-c224d77c48dd",
+        "1961 (24.12)": "2e46e1de-3e6f-4d49-a8b0-70f6f376ae4e",
+    },
+    "Источник": {
+        "автор": "0c2e45d4-ad1f-4f07-a39f-860e65d5ee38",
+    },
 }
 
 VOLUME_LIMITS = {
@@ -690,8 +715,10 @@ def _resolve_prop_code(label: str) -> str | None:
     code = LABEL_TO_CODE.get(label)
     if code:
         return code
+    # без знака вопроса / пробелов
+    norm = label.lower().rstrip("?").strip()
     for lab, c in LABEL_TO_CODE.items():
-        if lab.lower() == label.lower():
+        if lab.lower().rstrip("?").strip() == norm:
             return c
     return None
 
@@ -704,7 +731,9 @@ def _is_relation_label(label: str) -> bool:
 def build_properties_payload(properties: dict, resolver_data: dict | None = None, table_key: str = "") -> list:
     """
     Формирует список properties для command/execute.
-    Для связей резолвит имена → id.
+    - select → option id
+    - binding/relation → list of article ids
+    - number/text → as-is
     """
     prop_list = []
     for label, value in properties.items():
@@ -713,17 +742,34 @@ def build_properties_payload(properties: dict, resolver_data: dict | None = None
             print(f"[write] Нет code для «{label}» — пропускаю")
             continue
 
-        # Связи: превращаем имена в список id
-        if _is_relation_label(label) and resolver_data is not None:
+        # 1. Select: текст → option id
+        sel_key = None
+        if label in SELECT_OPTIONS:
+            sel_key = label
+        else:
+            for k in SELECT_OPTIONS:
+                if k.lower().rstrip("?").strip() == label.lower().rstrip("?").strip():
+                    sel_key = k
+                    break
+        if sel_key:
+            opts = SELECT_OPTIONS[sel_key]
+            key = str(value).strip().lower()
+            if key in opts:
+                value = opts[key]
+                print(f"[write] select «{label}»={key} → {value}")
+            else:
+                print(f"[write] select «{label}»: неизвестная опция «{value}», варианты: {list(opts.keys())}")
+
+        # 2. Связи / binding: имена → id
+        elif _is_relation_label(label) and resolver_data is not None:
             names = [n.strip() for n in re.split(r'[,;]', str(value)) if n.strip()]
             ids = []
-            # определяем таблицу связи
             low = label.lower()
-            if any(x in low for x in ("участник", "pov", "персонаж", "связанные персонажи")):
+            if any(x in low for x in ("участник", "pov", "персонаж")):
                 rel_table = "characters"
-            elif any(x in low for x in ("локац", "родительская локация")):
+            elif any(x in low for x in ("локац",)):
                 rel_table = "locations"
-            elif "родител" in low and "событ" in low:
+            elif "родител" in low:
                 rel_table = "events"
             elif "глав" in low:
                 rel_table = "chapters"
@@ -736,8 +782,14 @@ def build_properties_payload(properties: dict, resolver_data: dict | None = None
                     ids.append(r["id"])
                 else:
                     print(f"[write] связь «{n}» не резолвнута: {r.get('question')}")
-            # Teamly relation value = list of ids or list of {id: ...}
             value = ids
+
+        # 3. Number
+        elif label in ("Хронопорядок",):
+            try:
+                value = int(str(value).replace(" ", "").replace(",", ""))
+            except ValueError:
+                pass
 
         prop_list.append({
             "method": "add",
