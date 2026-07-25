@@ -377,30 +377,47 @@ def resolve_relation(val, id_to_title):
     return ", ".join(names) if names else None
 
 def format_card(card, id_to_title):
-    """Формирует блок карточки с резолвнутыми связями и человеческими названиями полей."""
+    """Формирует блок карточки с резолвнутыми связями, без дублей и с резолвом статусов."""
     lines = [f"### {card['title']}"]
     props = card.get("properties") or {}
     
-    meta = []
-    relations = []
+    meta = {}          # label → value (последний побеждает)
+    relations = {}     # label → set of names (дедуп)
     
     for k, v in props.items():
-        label = PROPERTY_LABELS.get(k, k)  # если неизвестно — оставляем как есть
-        # Пропускаем чисто технические ID
+        label = PROPERTY_LABELS.get(k, k)
         if label in ("ID",) or k in ("4LZq", "8LHF"):
             continue
+        
+        # Простые значения или одиночные UUID (статусы, типы и т.п.)
         if not isinstance(v, (list, dict)):
-            if v is not None and str(v).strip() and str(v) not in ("None", "null"):
-                meta.append(f"{label}: {v}")
+            if v is None or str(v).strip() in ("", "None", "null"):
+                continue
+            val = str(v).strip()
+            # Если это UUID — пробуем резолвить как relation
+            if len(val) == 36 and val.count("-") == 4:
+                resolved = id_to_title.get(val)
+                if resolved:
+                    val = resolved
+            meta[label] = val
             continue
+        
+        # Relation (список)
         resolved = resolve_relation(v, id_to_title)
-        if resolved is not None:
-            relations.append(f"{label}: {resolved}")
+        if resolved:
+            if label not in relations:
+                relations[label] = set()
+            for name in resolved.split(", "):
+                relations[label].add(name.strip())
     
+    # Мета-строка
     if meta:
-        lines.append(" | ".join(meta[:8]))
-    for r in relations:
-        lines.append(r)
+        meta_parts = [f"{k}: {v}" for k, v in meta.items()]
+        lines.append(" | ".join(meta_parts[:8]))
+    
+    # Связи без дублей
+    for label, names in relations.items():
+        lines.append(f"{label}: {', '.join(sorted(names))}")
     
     body = card.get("body") or ""
     if body:
