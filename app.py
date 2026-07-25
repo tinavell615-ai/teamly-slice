@@ -12,12 +12,11 @@ app = Flask(__name__)
 CLIENT_ID = os.environ.get("CLIENT_ID", "")
 CLIENT_SECRET = os.environ.get("CLIENT_SECRET", "")
 INITIAL_REFRESH_TOKEN = os.environ.get("REFRESH_TOKEN", "")
-RAILWAY_API_TOKEN = os.environ.get("RAILWAY_API_TOKEN", "")
-TOKENS_FILE = os.environ.get("TOKENS_FILE", "/tmp/teamly_tokens.json")
+UPSTASH_REDIS_REST_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "").rstrip("/")
+UPSTASH_REDIS_REST_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
 SLUG = "tina-vell"
 CLUSTER = "https://app.teamly.ru"
-RAILWAY_PROJECT_ID = "d12688c9-9438-4622-ad96-fb9c916aa597"
-RAILWAY_GQL = "https://backboard.railway.app/graphql/v2"
+TOKENS_KEY = "teamly_tokens"
 
 PROJECTS = {
     "burevestnik": {
@@ -38,7 +37,7 @@ VOLUME_LIMITS = {
     "full": 999999
 }
 
-# ===================== TOKEN SYSTEM (P0) =====================
+# ===================== TOKEN SYSTEM (P0) — Upstash Redis =====================
 REFRESH_MARGIN_SEC = 15 * 60
 PROACTIVE_INTERVAL_SEC = 25 * 60
 
@@ -57,129 +56,79 @@ _lock = threading.Lock()
 def _now():
     return int(time.time())
 
-def _load_from_file():
+def _upstash_get():
+    if not UPSTASH_REDIS_REST_URL or not UPSTASH_REDIS_REST_TOKEN:
+        return None
     try:
-        if not os.path.exists(TOKENS_FILE):
+        r = requests.get(
+            f"{UPSTASH_REDIS_REST_URL}/get/{TOKENS_KEY}",
+            headers={"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"},
+            timeout=10
+        )
+        if r.status_code != 200:
+            print(f"[upstash] GET failed: {r.status_code} {r.text[:200]}")
+            return None
+        data = r.json()
+        result = data.get("result")
+        if not result:
+            return None
+        return json.loads(result)
+    except Exception as e:
+        print(f"[upstash] GET exception: {e}")
+        return None
+
+def _upstash_set(payload: dict):
+    if not UPSTASH_REDIS_REST_URL or not UPSTASH_REDIS_REST_TOKEN:
+        print("[upstash] Нет URL/TOKEN — пропускаю сохранение")
+        return False
+    try:
+        import urllib.parse
+        value = json.dumps(payload, ensure_ascii=False)
+        encoded = urllib.parse.quote(value, safe="")
+        r = requests.post(
+            f"{UPSTASH_REDIS_REST_URL}/set/{TOKENS_KEY}/{encoded}",
+            headers={"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"},
+            timeout=10
+        )
+        if r.status_code != 200:
+            print(f"[upstash] SET failed: {r.status_code} {r.text[:300]}")
             return False
-        with open(TOKENS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not data.get("access_token") or not data.get("refresh_token"):
-            return False
+        print("[upstash] Токены сохранены в Redis")
+        return True
+    except Exception as e:
+        print(f"[upstash] SET exception: {e}")
+        return False
+
+def _load_tokens():
+    data = _upstash_get()
+    if data and data.get("access_token") and data.get("refresh_token"):
         _state["access_token"] = data["access_token"]
         _state["refresh_token"] = data["refresh_token"]
         _state["access_token_expires_at"] = int(data.get("access_token_expires_at", 0))
         _state["refresh_token_expires_at"] = int(data.get("refresh_token_expires_at", 0))
         _state["last_refresh_at"] = data.get("last_refresh_at")
         _state["last_refresh_ok"] = data.get("last_refresh_ok")
-        _state["source"] = "file"
-        print(f"[tokens] Загружено из {TOKENS_FILE}")
+        _state["source"] = "upstash"
+        print("[tokens] Загружено из Upstash")
         return True
-    except Exception as e:
-        print(f"[tokens] Не удалось прочитать {TOKENS_FILE}: {e}")
-        return False
-
-def _save_to_file():
-    try:
-        payload = {
-            "access_token": _state["access_token"],
-            "refresh_token": _state["refresh_token"],
-            "access_token_expires_at": _state["access_token_expires_at"],
-            "refresh_token_expires_at": _state["refresh_token_expires_at"],
-            "last_refresh_at": _state["last_refresh_at"],
-            "last_refresh_ok": _state["last_refresh_ok"],
-            "saved_at": _now(),
-        }
-        with open(TOKENS_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-        print(f"[tokens] Сохранено в {TOKENS_FILE}")
+    if INITIAL_REFRESH_TOKEN:
+        _state["refresh_token"] = INITIAL_REFRESH_TOKEN
+        _state["source"] = "env"
+        print("[tokens] Стартуем с REFRESH_TOKEN из env")
         return True
-    except Exception as e:
-        print(f"[tokens] НЕ удалось сохранить в {TOKENS_FILE}: {e}")
-        return False
+    return False
 
-
-_railway_env_id = None
-
-def _get_railway_env_id():
-    global _railway_env_id
-    if _railway_env_id:
-        return _railway_env_id
-    if not RAILWAY_API_TOKEN:
-        return None
-    try:
-        q = """
-        query($id: String!) {
-          project(id: $id) {
-            environments {
-              edges { node { id name } }
-            }
-          }
-        }
-        """
-        r = requests.post(
-            RAILWAY_GQL,
-            headers={"Authorization": f"Bearer {RAILWAY_API_TOKEN}", "Content-Type": "application/json"},
-            json={"query": q, "variables": {"id": RAILWAY_PROJECT_ID}},
-            timeout=15
-        )
-        if r.status_code != 200:
-            print(f"[railway] Не удалось получить environments: {r.status_code} {r.text[:200]}")
-            return None
-        data = r.json()
-        edges = data.get("data", {}).get("project", {}).get("environments", {}).get("edges", [])
-        for edge in edges:
-            node = edge.get("node", {})
-            if node.get("name") == "production":
-                _railway_env_id = node["id"]
-                print(f"[railway] environmentId production = {_railway_env_id}")
-                return _railway_env_id
-        print("[railway] production environment не найден")
-        return None
-    except Exception as e:
-        print(f"[railway] Ошибка получения env_id: {e}")
-        return None
-
-def _update_railway_refresh_token(new_refresh: str):
-    """Обновляет Variable REFRESH_TOKEN в Railway, чтобы пережить рестарт."""
-    if not RAILWAY_API_TOKEN or not new_refresh:
-        return False
-    env_id = _get_railway_env_id()
-    if not env_id:
-        print("[railway] Не могу обновить Variable — нет environmentId")
-        return False
-    try:
-        mutation = """
-        mutation($input: VariableUpsertInput!) {
-          variableUpsert(input: $input)
-        }
-        """
-        variables = {
-            "input": {
-                "projectId": RAILWAY_PROJECT_ID,
-                "environmentId": env_id,
-                "name": "REFRESH_TOKEN",
-                "value": new_refresh
-            }
-        }
-        r = requests.post(
-            RAILWAY_GQL,
-            headers={"Authorization": f"Bearer {RAILWAY_API_TOKEN}", "Content-Type": "application/json"},
-            json={"query": mutation, "variables": variables},
-            timeout=15
-        )
-        if r.status_code != 200:
-            print(f"[railway] Ошибка upsert Variable: {r.status_code} {r.text[:300]}")
-            return False
-        data = r.json()
-        if "errors" in data:
-            print(f"[railway] GraphQL errors: {data['errors']}")
-            return False
-        print("[railway] REFRESH_TOKEN успешно обновлён в Railway Variables")
-        return True
-    except Exception as e:
-        print(f"[railway] EXCEPTION при обновлении Variable: {e}")
-        return False
-
+def _save_tokens():
+    payload = {
+        "access_token": _state["access_token"],
+        "refresh_token": _state["refresh_token"],
+        "access_token_expires_at": _state["access_token_expires_at"],
+        "refresh_token_expires_at": _state["refresh_token_expires_at"],
+        "last_refresh_at": _state["last_refresh_at"],
+        "last_refresh_ok": _state["last_refresh_ok"],
+        "saved_at": _now(),
+    }
+    return _upstash_set(payload)
 
 def _do_refresh():
     refresh_token = _state["refresh_token"] or INITIAL_REFRESH_TOKEN
@@ -216,21 +165,16 @@ def _do_refresh():
         if new_refresh:
             _state["refresh_token"] = new_refresh
             print("[tokens] Получен НОВЫЙ refresh_token (ротация)")
-            _update_railway_refresh_token(new_refresh)
         _state["access_token_expires_at"] = exp
         _state["refresh_token_expires_at"] = rexp
         _state["last_refresh_at"] = _now()
         _state["last_refresh_ok"] = True
         _state["last_error"] = None
         _state["source"] = "refresh"
-        _save_to_file()
-
+        _save_tokens()
         print("=" * 60)
         print("[tokens] УСПЕШНЫЙ REFRESH")
         print(f"expires_at = {exp} ({datetime.fromtimestamp(exp)})")
-        if new_refresh:
-            print("НОВЫЙ refresh_token (при рестарте контейнера обнови Variable):")
-            print(new_refresh)
         print("=" * 60)
         return True
     except Exception as e:
@@ -242,13 +186,8 @@ def _do_refresh():
 def get_token():
     with _lock:
         if _state["access_token"] is None:
-            if not _load_from_file():
-                if INITIAL_REFRESH_TOKEN:
-                    _state["refresh_token"] = INITIAL_REFRESH_TOKEN
-                    _state["source"] = "env"
-                    print("[tokens] Стартуем с REFRESH_TOKEN из env")
-                else:
-                    raise Exception("Нет токенов: ни файла, ни REFRESH_TOKEN в env")
+            if not _load_tokens():
+                raise Exception("Нет токенов: ни Upstash, ни REFRESH_TOKEN в env")
         now = _now()
         expires = _state["access_token_expires_at"]
         if _state["access_token"] and expires > now + REFRESH_MARGIN_SEC:
@@ -274,8 +213,7 @@ def get_status():
             "last_refresh_ok": _state["last_refresh_ok"],
             "last_error": _state["last_error"],
             "has_refresh_token": bool(_state["refresh_token"] or INITIAL_REFRESH_TOKEN),
-            "tokens_file": TOKENS_FILE,
-            "file_exists": os.path.exists(TOKENS_FILE),
+            "storage": "upstash",
         }
 
 def _proactive_loop():
@@ -294,7 +232,7 @@ def _proactive_loop():
 def start_proactive_refresh():
     t = threading.Thread(target=_proactive_loop, daemon=True)
     t.start()
-    print("[tokens] Проактивный refresh-поток запущен")
+    print("[tokens] Проактивный refresh-поток запущен (Upstash)")
 
 # ===================== END TOKEN SYSTEM =====================
 
