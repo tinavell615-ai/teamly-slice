@@ -814,8 +814,16 @@ def update_article_properties(table_id: str, article_id: str, properties: dict, 
         return {"ok": True, "error": None}
 
     last_err = None
-    for try_code in ("article_update", "property_value_set", "article_create"):
-        # для article_create при обновлении тоже пробуем — иногда API так принимает
+    # Возможные code для обновления свойств существующей статьи
+    try_codes = (
+        "article_update",
+        "property_value_set",
+        "property_value_update",
+        "article_property_update",
+        "set_property_value",
+        "update_properties",
+    )
+    for try_code in try_codes:
         payload = {
             "code": try_code,
             "payload": {
@@ -833,8 +841,33 @@ def update_article_properties(table_id: str, article_id: str, properties: dict, 
             return {"ok": True, "error": None, "raw": result}
         except Exception as e:
             last_err = str(e)
-            print(f"[write] update_props {try_code} failed: {e}")
+            print(f"[write] update_props {try_code} failed: {str(e)[:150]}")
             continue
+
+    # Fallback: по одному свойству через article_create-подобный payload не пробуем —
+    # id уже существует. Пробуем method=set вместо add.
+    prop_list_set = [{**p, "method": "set"} for p in prop_list]
+    for try_code in ("article_update", "property_value_set"):
+        payload = {
+            "code": try_code,
+            "payload": {
+                "entity": {
+                    "spaceId": table_id,
+                    "id": article_id,
+                    "properties": prop_list_set
+                }
+            }
+        }
+        try:
+            result = api("/api/v1/wiki/properties/command/execute", payload)
+            print(f"[write] update_props via {try_code}+set: {str(result)[:200]}")
+            _log_write("update_props", title or article_id, table_id, True, f"code={try_code}/set")
+            return {"ok": True, "error": None, "raw": result}
+        except Exception as e:
+            last_err = str(e)
+            print(f"[write] update_props {try_code}/set failed: {str(e)[:150]}")
+            continue
+
     _log_write("update_props", title or article_id, table_id, False, last_err or "")
     return {"ok": False, "error": last_err}
 
