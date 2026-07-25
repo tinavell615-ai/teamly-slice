@@ -28,7 +28,25 @@ PROJECTS = {
             "events": "bd5891eb-976b-4f7b-8bf0-5cb19d53c302",
             "chapters": "c288e5e4-ae16-44e2-8937-63e0ed8dd748"
         }
-    }
+    },
+    "detective_v7": {
+        "name": "Детективный движок v7 (тест)",
+        "space_id": "846990cf-487f-4650-9cf1-f396492d2e17",
+        "tables": {
+            "world": "d024b1b2-f999-437b-affd-0fc259233fa3",
+            "locations": "d9ab271c-f7be-43a2-a158-d74ae959e279",
+            "characters": "f32e41c6-384b-4af1-8d54-cb5329a57c22",
+            "organizations": "d0db18e6-35d9-4b52-bfaa-152e4baeb93a",
+            "artifacts": "9259fcdc-288f-4924-b300-22ad61c7117c",
+            "lines": "ff412fe6-2a64-4588-bcf9-341a2ab1cdcc",
+            "events": "8ea0fdf1-2bec-4775-a571-d90f88ae8361",
+            "chapters": "616b179d-22be-4aa1-acdc-ae06b6743c68",
+            "hooks": "4d7e944d-19ca-4b01-90b7-2f2d2ff76fea",
+            "secrets": "9e9faf75-82e3-429e-8be6-5f07f2173614",
+            "references": "fda2d470-9b68-40b8-88dd-5102db9d836a",
+            "archive": "d0384707-f300-41ba-b4ea-a515a1b55394",
+        }
+    },
 }
 
 
