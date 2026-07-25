@@ -808,23 +808,19 @@ def update_article_properties(table_id: str, article_id: str, properties: dict, 
                                resolver_data: dict | None = None, table_key: str = "") -> dict:
     """
     Обновляет свойства существующей карточки (включая связи).
+    Пробует несколько форматов payload — Teamly docs не дают точный code для update values.
     """
     prop_list = build_properties_payload(properties, resolver_data, table_key)
     if not prop_list:
         return {"ok": True, "error": None}
 
     last_err = None
-    # Возможные code для обновления свойств существующей статьи
-    try_codes = (
-        "article_update",
-        "property_value_set",
-        "property_value_update",
-        "article_property_update",
-        "set_property_value",
-        "update_properties",
-    )
-    for try_code in try_codes:
-        payload = {
+    attempts = []
+
+    # A. command/execute с разными code
+    for try_code in ("article_update", "property_value_set", "property_value_update",
+                     "update_article", "article_property_set"):
+        attempts.append({
             "code": try_code,
             "payload": {
                 "entity": {
@@ -833,43 +829,61 @@ def update_article_properties(table_id: str, article_id: str, properties: dict, 
                     "properties": prop_list
                 }
             }
-        }
-        try:
-            result = api("/api/v1/wiki/properties/command/execute", payload)
-            print(f"[write] update_props via {try_code}: {str(result)[:200]}")
-            _log_write("update_props", title or article_id, table_id, True, f"code={try_code}")
-            return {"ok": True, "error": None, "raw": result}
-        except Exception as e:
-            last_err = str(e)
-            print(f"[write] update_props {try_code} failed: {str(e)[:150]}")
-            continue
+        })
 
-    # Fallback: по одному свойству через article_create-подобный payload не пробуем —
-    # id уже существует. Пробуем method=set вместо add.
-    prop_list_set = [{**p, "method": "set"} for p in prop_list]
-    for try_code in ("article_update", "property_value_set"):
-        payload = {
-            "code": try_code,
-            "payload": {
-                "entity": {
-                    "spaceId": table_id,
-                    "id": article_id,
-                    "properties": prop_list_set
-                }
+    # B. articleId на верхнем уровне payload
+    attempts.append({
+        "code": "article_update",
+        "payload": {
+            "articleId": article_id,
+            "spaceId": table_id,
+            "properties": prop_list
+        }
+    })
+
+    # C. method=set
+    prop_set = [{**p, "method": "set"} for p in prop_list]
+    attempts.append({
+        "code": "article_update",
+        "payload": {
+            "entity": {
+                "spaceId": table_id,
+                "id": article_id,
+                "properties": prop_set
             }
         }
+    })
+
+    # D. method=update
+    prop_upd = [{**p, "method": "update"} for p in prop_list]
+    attempts.append({
+        "code": "article_update",
+        "payload": {
+            "entity": {
+                "spaceId": table_id,
+                "id": article_id,
+                "properties": prop_upd
+            }
+        }
+    })
+
+    for i, payload in enumerate(attempts):
         try:
             result = api("/api/v1/wiki/properties/command/execute", payload)
-            print(f"[write] update_props via {try_code}+set: {str(result)[:200]}")
-            _log_write("update_props", title or article_id, table_id, True, f"code={try_code}/set")
+            print(f"[write] update_props attempt {i} OK code={payload.get('code')}: {str(result)[:200]}")
+            _log_write("update_props", title or article_id, table_id, True, f"attempt={i}")
             return {"ok": True, "error": None, "raw": result}
         except Exception as e:
             last_err = str(e)
-            print(f"[write] update_props {try_code}/set failed: {str(e)[:150]}")
+            # не логируем каждый 422 про "существующий объект" полностью
+            short = last_err[:120].replace("\n", " ")
+            print(f"[write] update_props attempt {i} fail code={payload.get('code')}: {short}")
             continue
 
     _log_write("update_props", title or article_id, table_id, False, last_err or "")
     return {"ok": False, "error": last_err}
+
+
 
 def append_body(space_id: str, article_id: str, text: str, title: str = "") -> dict:
     """
