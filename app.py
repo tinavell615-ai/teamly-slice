@@ -826,77 +826,76 @@ def build_properties_payload(properties: dict, resolver_data: dict | None = None
 def update_article_properties(table_id: str, article_id: str, properties: dict, title: str = "",
                                resolver_data: dict | None = None, table_key: str = "") -> dict:
     """
-    Обновляет свойства существующей карточки (включая связи).
-    Пробует несколько форматов payload — Teamly docs не дают точный code для update values.
+    Обновляет свойства существующей карточки.
+    command/execute с article_update* не работает — пробуем прямые эндпоинты.
     """
     prop_list = build_properties_payload(properties, resolver_data, table_key)
     if not prop_list:
         return {"ok": True, "error": None}
 
     last_err = None
+    token = get_token()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-Account-Slug": SLUG,
+        "Content-Type": "application/json"
+    }
+
     attempts = []
 
-    # A. command/execute с разными code
-    for try_code in ("article_update", "property_value_set", "property_value_update",
-                     "update_article", "article_property_set"):
-        attempts.append({
-            "code": try_code,
-            "payload": {
-                "entity": {
-                    "spaceId": table_id,
-                    "id": article_id,
-                    "properties": prop_list
-                }
-            }
-        })
+    # 1. command/execute — article_update с properties
+    attempts.append(("cmd/article_update", "POST",
+        f"{CLUSTER}/api/v1/wiki/properties/command/execute",
+        {"code": "article_update", "payload": {"entity": {"spaceId": table_id, "id": article_id, "properties": prop_list}}}))
 
-    # B. articleId на верхнем уровне payload
-    attempts.append({
-        "code": "article_update",
-        "payload": {
-            "articleId": article_id,
-            "spaceId": table_id,
-            "properties": prop_list
-        }
-    })
+    # 2. PUT article
+    attempts.append(("PUT article", "PUT",
+        f"{CLUSTER}/api/v1/wiki/spaces/{table_id}/articles/{article_id}",
+        {"properties": prop_list}))
 
-    # C. method=set
-    prop_set = [{**p, "method": "set"} for p in prop_list]
-    attempts.append({
-        "code": "article_update",
-        "payload": {
-            "entity": {
-                "spaceId": table_id,
-                "id": article_id,
-                "properties": prop_set
-            }
-        }
-    })
+    # 3. PATCH article
+    attempts.append(("PATCH article", "PATCH",
+        f"{CLUSTER}/api/v1/wiki/spaces/{table_id}/articles/{article_id}",
+        {"properties": prop_list}))
 
-    # D. method=update
-    prop_upd = [{**p, "method": "update"} for p in prop_list]
-    attempts.append({
-        "code": "article_update",
-        "payload": {
-            "entity": {
-                "spaceId": table_id,
-                "id": article_id,
-                "properties": prop_upd
-            }
-        }
-    })
+    # 4. POST properties на статью
+    attempts.append(("POST article/properties", "POST",
+        f"{CLUSTER}/api/v1/wiki/spaces/{table_id}/articles/{article_id}/properties",
+        {"properties": prop_list}))
 
-    for i, payload in enumerate(attempts):
+    # 5. command с propertyId вместо code (если есть в schema — пока code)
+    attempts.append(("cmd/set_properties", "POST",
+        f"{CLUSTER}/api/v1/wiki/properties/command/execute",
+        {"code": "set_properties", "payload": {"spaceId": table_id, "articleId": article_id, "properties": prop_list}}))
+
+    # 6. По одному свойству через command article_create-style но method=set
+    # (иногда API принимает частичный update)
+    for p in prop_list:
+        attempts.append((f"cmd/single {p.get('code')}", "POST",
+            f"{CLUSTER}/api/v1/wiki/properties/command/execute",
+            {"code": "article_update", "payload": {"entity": {
+                "spaceId": table_id, "id": article_id,
+                "properties": [{**p, "method": "set"}]
+            }}}))
+
+    import requests as req
+    for name, method, url, body in attempts:
         try:
-            result = api("/api/v1/wiki/properties/command/execute", payload)
-            print(f"[write] update_props attempt {i} OK code={payload.get('code')}: {str(result)[:200]}")
-            _log_write("update_props", title or article_id, table_id, True, f"attempt={i}")
-            return {"ok": True, "error": None, "raw": result}
+            if method == "POST":
+                r = req.post(url, headers=headers, json=body, timeout=30)
+            elif method == "PUT":
+                r = req.put(url, headers=headers, json=body, timeout=30)
+            else:
+                r = req.patch(url, headers=headers, json=body, timeout=30)
+            print(f"[write] update {name}: {r.status_code} body_len={len(r.text)}")
+            if r.status_code in (200, 201, 204):
+                _log_write("update_props", title or article_id, table_id, True, name)
+                return {"ok": True, "error": None, "raw": r.text[:300]}
+            last_err = f"{name}: {r.status_code} {r.text[:200]}"
+            print(f"[write] update {name} fail: {r.text[:150]}")
         except Exception as e:
-            last_err = str(e)
-            # не логируем каждый 422 про "существующий объект" полностью
-            short = last_err[:120].replace("\n", " ")
-            print(f"[write] update_props attempt {i} fail code={payload.get('code')}: {short}")
+            last_err = f"{name}: {e}"
+            print(f"[write] update {name} exc: {e}")
             continue
 
     _log_write("update_props", title or article_id, table_id, False, last_err or "")
