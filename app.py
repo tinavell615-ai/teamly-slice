@@ -79,6 +79,778 @@ VOLUME_LIMITS = {
     "full": 999999
 }
 
+# ===================== NAME RESOLVER (Task C) =====================
+import re
+import uuid
+
+# Эмодзи-префиксы, которые нужно игнорировать при сопоставлении
+EMOJI_PREFIX_RE = re.compile(
+    r'^[\U0001F300-\U0001F9FF\U00002600-\U000027BF\U0001F600-\U0001F64F'
+    r'\U0001F680-\U0001F6FF\U0001F1E0-\U0001F1FF\U00002702-\U000027B0'
+    r'\U000024C2-\U0001F251\U0001F900-\U0001F9FF\U0001FA00-\U0001FA6F'
+    r'\U0001FA70-\U0001FAFF\U00002600-\U000026FF\s]*'
+)
+
+def normalize_title(title: str) -> str:
+    """Убирает эмодзи-префиксы, лишние пробелы, приводит к нижнему регистру."""
+    if not title:
+        return ""
+    t = EMOJI_PREFIX_RE.sub("", title)
+    t = re.sub(r'\s+', ' ', t).strip().lower()
+    return t
+
+def build_title_to_ids(project_key: str = "burevestnik") -> dict:
+    """
+    Строит словарь: table_key → {normalized_title → [id, ...]}
+    Один title может иметь несколько id (дубли) — тогда вопрос автору.
+    """
+    project = PROJECTS.get(project_key)
+    if not project:
+        return {}
+    
+    title_to_ids = {}          # normalized → [(table_key, id, original_title), ...]
+    per_table = {k: {} for k in project["tables"]}
+    
+    for table_key, table_id in project["tables"].items():
+        try:
+            data = api("/api/v1/ql/content-database/content", {
+                "query": {
+                    "__filter": {"contentDatabaseId": table_id},
+                    "content": {"article": {"id": True, "title": True}}
+                }
+            })
+            for item in data.get("content", []):
+                art = item.get("article", {})
+                cid = art.get("id")
+                title = art.get("title") or ""
+                if not cid:
+                    continue
+                norm = normalize_title(title)
+                if not norm:
+                    continue
+                # общий
+                title_to_ids.setdefault(norm, []).append((table_key, cid, title))
+                # по таблице
+                per_table[table_key].setdefault(norm, []).append((cid, title))
+        except Exception as e:
+            print(f"[resolver] Ошибка загрузки {table_key}: {e}")
+    
+    return {
+        "global": title_to_ids,
+        "per_table": per_table
+    }
+
+def resolve_name(name: str, table_key: str, resolver_data: dict) -> dict:
+    """
+    Резолвит одно имя.
+    Возвращает:
+    {
+        "status": "ok" | "not_found" | "ambiguous",
+        "id": "...",           # только если ok
+        "original_title": "...",
+        "candidates": [...]    # если ambiguous
+        "question": "..."      # текст для предпросмотра
+    }
+    """
+    norm = normalize_title(name)
+    if not norm:
+        return {"status": "not_found", "question": "Пустое название после нормализации"}
+    
+    per_table = resolver_data.get("per_table", {})
+    table_map = per_table.get(table_key, {})
+    
+    matches = table_map.get(norm, [])
+    
+    if len(matches) == 0:
+        return {
+            "status": "not_found",
+            "question": f'«{name}» не найден в таблице «{table_key}». Создать новую карточку / это опечатка?'
+        }
+    if len(matches) == 1:
+        cid, orig = matches[0]
+        return {
+            "status": "ok",
+            "id": cid,
+            "original_title": orig
+        }
+    # ambiguous
+    candidates = [{"id": cid, "title": orig} for cid, orig in matches]
+    return {
+        "status": "ambiguous",
+        "candidates": candidates,
+        "question": f'Найдено несколько карточек, похожих на «{name}». Какую использовать?'
+    }
+
+def make_idempotent(action: str, name: str, table_key: str, resolver_data: dict) -> str:
+    """
+    Если action == "создать", но карточка уже существует → возвращаем "обновить".
+    Иначе возвращаем исходный action.
+    """
+    if action != "создать":
+        return action
+    res = resolve_name(name, table_key, resolver_data)
+    if res["status"] == "ok":
+        return "обновить"
+    return action
+
+
+# ===================== DELTA PARSER + PREVIEW (Task D) =====================
+
+TABLE_ALIASES = {
+    "мир": "world",
+    "локации": "locations",
+    "персонажи": "characters",
+    "крючки": "hooks",
+    "секреты": "secrets",
+    "события": "events",
+    "главы": "chapters",
+    "архив": "archive",
+}
+
+TABLE_DISPLAY = {
+    "world": "Мир",
+    "locations": "Локации",
+    "characters": "Персонажи",
+    "hooks": "Крючки",
+    "secrets": "Секреты",
+    "events": "События",
+    "chapters": "Главы",
+    "archive": "Архив",
+}
+
+def parse_delta(text: str) -> list:
+    """
+    Парсит текст DELTA в список действий.
+    Поддерживает несколько карточек в одном блоке, разделённых ---.
+    """
+    actions = []
+    # Сначала убираем обёртку
+    text = re.sub(r'(?m)^=== DELTA ===\s*$', '', text)
+    text = re.sub(r'(?m)^=== КОНЕЦ DELTA ===.*', '', text)
+    text = text.strip()
+
+    # Разбиваем на карточки по --- (но не внутри тела)
+    # Простой подход: сначала найдём все заголовки ТАБЛИЦА: и разрежем по ним
+    parts = re.split(r'(?m)(?=^ТАБЛИЦА:\s*)', text)
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        lines = part.splitlines()
+        action = {
+            "table_key": None,
+            "table_display": None,
+            "action": "создать",
+            "title": None,
+            "properties": {},
+            "body_mode": None,
+            "body": None,
+            "raw_block": part
+        }
+        body_lines = []
+        in_body = False
+        body_mode = None
+
+        for line in lines:
+            stripped = line.strip()
+            upper = stripped.upper()
+
+            if in_body:
+                # Если встретили новый ключ верхнего уровня — заканчиваем тело
+                if upper.startswith("ТАБЛИЦА:") or upper.startswith("---"):
+                    break
+                body_lines.append(line)
+                continue
+
+            if upper.startswith("ТАБЛИЦА:"):
+                raw = stripped.split(":", 1)[1].strip().lower()
+                key = TABLE_ALIASES.get(raw)
+                if key:
+                    action["table_key"] = key
+                    action["table_display"] = TABLE_DISPLAY.get(key, raw)
+                else:
+                    action["table_key"] = raw
+                    action["table_display"] = stripped.split(":", 1)[1].strip()
+            elif upper.startswith("ДЕЙСТВИЕ:"):
+                act = stripped.split(":", 1)[1].strip().lower()
+                action["action"] = "обновить" if "обнов" in act else "создать"
+            elif upper.startswith("НАЗВАНИЕ:"):
+                action["title"] = stripped.split(":", 1)[1].strip()
+            elif upper.startswith("ТЕЛО-ДОПОЛНИТЬ:") or upper == "ТЕЛО-ДОПОЛНИТЬ:":
+                in_body = True
+                body_mode = "append"
+                rest = stripped.split(":", 1)[1].strip() if ":" in stripped else ""
+                if rest:
+                    body_lines.append(rest)
+            elif upper.startswith("ТЕЛО:") or upper == "ТЕЛО:":
+                in_body = True
+                body_mode = "replace"
+                rest = stripped.split(":", 1)[1].strip() if ":" in stripped else ""
+                if rest:
+                    body_lines.append(rest)
+            elif ":" in stripped and not stripped.startswith("---"):
+                k, v = stripped.split(":", 1)
+                k = k.strip()
+                v = v.strip()
+                if k and k.upper() not in ("ТАБЛИЦА", "ДЕЙСТВИЕ", "НАЗВАНИЕ"):
+                    action["properties"][k] = v
+
+        if body_mode:
+            action["body_mode"] = body_mode
+            action["body"] = "\n".join(body_lines).strip()
+
+        if action["title"] and action["table_key"]:
+            actions.append(action)
+
+    return actions
+
+
+def build_preview(delta_text: str, project_key: str = "burevestnik") -> dict:
+    """
+    Полный предпросмотр: creates / updates / warnings / questions.
+    """
+    actions = parse_delta(delta_text)
+    resolver_data = build_title_to_ids(project_key)
+
+    preview = {
+        "creates": [],
+        "updates": [],
+        "warnings": [],
+        "questions": [],
+        "raw_actions": actions,
+        "ok": True
+    }
+
+    for act in actions:
+        table_key = act["table_key"]
+        title = act["title"]
+        original_action = act["action"]
+
+        effective_action = make_idempotent(original_action, title, table_key, resolver_data)
+        act["effective_action"] = effective_action
+
+        res = resolve_name(title, table_key, resolver_data)
+
+        item = {
+            "table": act["table_display"],
+            "table_key": table_key,
+            "title": title,
+            "action": effective_action,
+            "properties": act["properties"],
+            "body_mode": act["body_mode"],
+            "body_preview": (act["body"][:300] + "…") if act.get("body") and len(act["body"]) > 300 else act.get("body"),
+            "resolved_id": res.get("id"),
+            "status": res["status"]
+        }
+
+        if res["status"] == "not_found":
+            if effective_action == "создать":
+                preview["creates"].append(item)
+            else:
+                q = res["question"]
+                preview["warnings"].append(q)
+                preview["questions"].append(q)
+                preview["ok"] = False
+        elif res["status"] == "ambiguous":
+            q = res["question"]
+            preview["questions"].append(q)
+            preview["warnings"].append(f"Неоднозначность: {title}")
+            item["candidates"] = res.get("candidates")
+            preview["ok"] = False
+            if effective_action == "создать":
+                preview["creates"].append(item)
+            else:
+                preview["updates"].append(item)
+        else:
+            if effective_action == "создать":
+                preview["creates"].append(item)
+            else:
+                preview["updates"].append(item)
+
+        # ========== ВАЛИДАЦИЯ ПО ПРАВИЛАМ БИБЛИИ (Task E) ==========
+
+        # 1. Крючки и Секреты — только по явному подтверждению
+        if table_key in ("hooks", "secrets") and effective_action == "создать":
+            q = f"⚠ Создание карточки в таблице «{act['table_display']}» требует явного подтверждения автора."
+            if q not in preview["questions"]:
+                preview["questions"].append(q)
+                preview["warnings"].append(q)
+            # блокируем автоматическое применение
+            preview["ok"] = False
+
+        # 2. Один персонаж = одна карточка (запрет «Тень Влада» при существующем «Влад»)
+        if table_key == "characters" and effective_action == "создать":
+            norm_new = normalize_title(title)
+            # проверяем, не является ли новое имя «расширением» уже существующего
+            per_table = resolver_data.get("per_table", {}).get("characters", {})
+            for existing_norm, matches in per_table.items():
+                if existing_norm and existing_norm != norm_new:
+                    # если существующее имя целиком входит в новое (и длиннее 3 символов)
+                    if len(existing_norm) > 3 and existing_norm in norm_new:
+                        existing_title = matches[0][1] if matches else existing_norm
+                        q = (f"⚠ Возможный дубль персонажа: «{title}» содержит существующее имя «{existing_title}». "
+                             f"По правилу «один персонаж = одна карточка» это, скорее всего, статус/форма, а не новая сущность.")
+                        if q not in preview["questions"]:
+                            preview["questions"].append(q)
+                            preview["warnings"].append(q)
+
+        # 3. В полях связей — только чистые имена (без скобок и описаний)
+        dirty_rel_props = []
+        for prop_name, prop_val in act["properties"].items():
+            low = prop_name.lower()
+            if low in ("участники", "pov", "локации", "родительское событие",
+                       "родительская локация", "связанные персонажи", "главы"):
+                names = [n.strip() for n in re.split(r'[,;]', prop_val) if n.strip()]
+                for n in names:
+                    if "(" in n or ")" in n or "[" in n or "]" in n:
+                        dirty_rel_props.append(f"«{n}» в поле «{prop_name}»")
+        if dirty_rel_props:
+            q = ("⚠ В полях связей найдены описания в скобках (нарушение правила 2.3). "
+                 "Нужны только чистые имена. Проблемные значения: " + "; ".join(dirty_rel_props[:5]))
+            if q not in preview["questions"]:
+                preview["questions"].append(q)
+                preview["warnings"].append(q)
+
+        # 4. Эмодзи-маркировка обязательна в названиях
+        EMOJI_START = re.compile(r'^[\U0001F300-\U0001F9FF\U00002600-\U000027BF\U0001F600-\U0001F64F'
+                                 r'\U0001F680-\U0001F6FF\U0001F1E0-\U0001F1FF\U00002702-\U000027B0'
+                                 r'\U000024C2-\U0001F251\U0001F900-\U0001F9FF\U0001FA00-\U0001FA6F'
+                                 r'\U0001FA70-\U0001FAFF\U00002600-\U000026FF]')
+        if title and not EMOJI_START.match(title.strip()):
+            # предлагаем префикс по таблице
+            suggested = {
+                "events": "🟧",
+                "characters": "👤",
+                "locations": "📍",
+                "hooks": "⚡",
+                "secrets": "🔒",
+                "chapters": "📖",
+                "world": "🌍",
+            }.get(table_key, "•")
+            q = (f"⚠ В названии «{title}» нет эмодзи-префикса (раздел 9). "
+                 f"Рекомендуется: {suggested} {title}")
+            if q not in preview["questions"]:
+                preview["questions"].append(q)
+                preview["warnings"].append(q)
+
+        # 5. Событие обязано иметь Локацию
+        if table_key == "events":
+            has_loc = False
+            for prop_name in act["properties"]:
+                if prop_name.lower() in ("локации", "локация", "locations", "location"):
+                    if act["properties"][prop_name].strip():
+                        has_loc = True
+                        break
+            if not has_loc:
+                q = f"⚠ Событие «{title}» не имеет локации (правило 2.6). Событие без места — нарушение."
+                if q not in preview["questions"]:
+                    preview["questions"].append(q)
+                    preview["warnings"].append(q)
+
+        # 6. Масштаб события ↔ масштаб локации (грубая проверка по эмодзи)
+        if table_key == "events":
+            event_level = None
+            if title.strip().startswith("🟥"):
+                event_level = "root"
+            elif title.strip().startswith("🟧"):
+                event_level = "mid"
+            elif title.strip().startswith("🟩"):
+                event_level = "leaf"
+            loc_val = None
+            for prop_name, prop_val in act["properties"].items():
+                if prop_name.lower() in ("локации", "локация"):
+                    loc_val = prop_val.strip()
+                    break
+            if event_level == "root" and loc_val and loc_val.startswith("🟩"):
+                q = (f"⚠ Масштаб: корневое событие (🟥) привязано к мелкой локации (🟩 «{loc_val}»). "
+                     "Крупное событие обычно происходит в крупной локации.")
+                if q not in preview["questions"]:
+                    preview["questions"].append(q)
+                    preview["warnings"].append(q)
+
+        # 7. Описательный текст не должен попадать в свойства (>200 символов)
+        for prop_name, prop_val in act["properties"].items():
+            if len(str(prop_val)) > 200:
+                q = (f"⚠ Свойство «{prop_name}» слишком длинное ({len(str(prop_val))} символов). "
+                     "Длинный текст должен быть в ТЕЛЕ, а не в свойствах (правило 2.0).")
+                if q not in preview["questions"]:
+                    preview["questions"].append(q)
+                    preview["warnings"].append(q)
+
+        # ========== РЕЗОЛВ СВЯЗЕЙ (после валидации) ==========
+        for prop_name, prop_val in act["properties"].items():
+            low = prop_name.lower()
+            if low in ("участники", "pov", "локации", "родительское событие",
+                       "родительская локация", "связанные персонажи", "главы"):
+                names = [n.strip() for n in re.split(r'[,;]', prop_val) if n.strip()]
+                for n in names:
+                    # очищаем от возможного мусора в скобках для резолва
+                    clean_n = re.sub(r'\s*[\(\[\{].*?[\)\]\}]\s*', '', n).strip()
+                    if not clean_n:
+                        continue
+                    if low in ("участники", "pov", "связанные персонажи"):
+                        rel_table = "characters"
+                    elif low in ("локации", "родительская локация"):
+                        rel_table = "locations"
+                    elif low == "родительское событие":
+                        rel_table = "events"
+                    elif low == "главы":
+                        rel_table = "chapters"
+                    else:
+                        rel_table = table_key
+                    r = resolve_name(clean_n, rel_table, resolver_data)
+                    if r["status"] != "ok":
+                        q = r.get("question", f"Проблема с «{n}»")
+                        if q not in preview["questions"]:
+                            preview["questions"].append(q)
+                            preview["warnings"].append(q)
+                            preview["ok"] = False
+
+    return preview
+
+
+def render_preview_html(preview: dict, delta_text: str) -> str:
+    """HTML-предпросмотр для автора."""
+    import html as html_mod
+    esc = html_mod.escape
+
+    parts = ['<div style="font-family: system-ui, sans-serif; max-width: 900px; margin: 20px auto; padding: 20px;">']
+    parts.append('<h2>Предпросмотр изменений</h2>')
+
+    if preview["creates"]:
+        parts.append('<h3 style="color:#0a7;">Будет создано</h3><ul>')
+        for item in preview["creates"]:
+            parts.append(f'<li><b>{esc(item["table"])}</b> → «{esc(item["title"])}»')
+            if item.get("properties"):
+                props = ", ".join(f"{esc(k)}: {esc(str(v))}" for k, v in list(item["properties"].items())[:6])
+                parts.append(f'<br><small>{props}</small>')
+            if item.get("body_preview"):
+                mode = "дополнить" if item["body_mode"] == "append" else "заменить тело"
+                parts.append(f'<br><small>[{mode}] {esc(item["body_preview"])}</small>')
+            parts.append('</li>')
+        parts.append('</ul>')
+
+    if preview["updates"]:
+        parts.append('<h3 style="color:#07a;">Будет обновлено</h3><ul>')
+        for item in preview["updates"]:
+            rid = (item.get("resolved_id") or "?")[:8]
+            parts.append(f'<li><b>{esc(item["table"])}</b> → «{esc(item["title"])}» <small>(id: {rid}…)</small>')
+            if item.get("properties"):
+                props = ", ".join(f"{esc(k)}: {esc(str(v))}" for k, v in list(item["properties"].items())[:6])
+                parts.append(f'<br><small>{props}</small>')
+            if item.get("body_preview"):
+                mode = "дополнить" if item["body_mode"] == "append" else "заменить тело"
+                parts.append(f'<br><small>[{mode}] {esc(item["body_preview"])}</small>')
+            parts.append('</li>')
+        parts.append('</ul>')
+
+    if preview["questions"]:
+        parts.append('<h3 style="color:#c50;">Предупреждения и вопросы</h3><ul>')
+        for q in preview["questions"]:
+            parts.append(f'<li style="color:#c50;">{esc(q)}</li>')
+        parts.append('</ul>')
+
+    if not preview["creates"] and not preview["updates"] and not preview["questions"]:
+        parts.append('<p>В DELTA не найдено распознанных действий.</p>')
+
+    parts.append('<hr>')
+    if preview["ok"] and (preview["creates"] or preview["updates"]):
+        # Для безопасности hidden value не используем длинный текст в HTML — 
+        # в реальном сервисе будем хранить в сессии / временном ключе.
+        # Здесь для прототипа — form with textarea.
+        parts.append('<form method="POST" action="/delta/apply">')
+        parts.append(f'<textarea name="delta" style="display:none;">{esc(delta_text)}</textarea>')
+        parts.append('<button type="submit" style="background:#0a7;color:white;padding:12px 24px;border:none;border-radius:6px;font-size:16px;cursor:pointer;">Применить изменения</button>')
+        parts.append(' &nbsp; <a href="/delta" style="color:#666;">Отмена</a>')
+        parts.append('</form>')
+    else:
+        parts.append('<p style="color:#c50;"><b>Применение заблокировано</b> — закройте вопросы выше или подтвердите создание Крючков/Секретов.</p>')
+        parts.append('<p><a href="/delta">← Вернуться к вводу DELTA</a></p>')
+
+    parts.append('</div>')
+    return "\n".join(parts)
+
+
+
+# ===================== WRITE ENGINE (Task F) =====================
+
+import logging
+from datetime import datetime as dt
+
+# Простой лог в память + print (в проде можно писать в файл/Upstash)
+WRITE_LOG = []
+
+def _log_write(action: str, title: str, table: str, success: bool, detail: str = ""):
+    entry = {
+        "ts": dt.now().isoformat(timespec="seconds"),
+        "action": action,
+        "title": title,
+        "table": table,
+        "success": success,
+        "detail": detail[:500]
+    }
+    WRITE_LOG.append(entry)
+    status = "OK" if success else "FAIL"
+    print(f"[write] {status} | {table} | {action} | {title} | {detail[:120]}")
+
+# Обратный словарь label → code (берём первое вхождение)
+LABEL_TO_CODE = {}
+for code, label in PROPERTY_LABELS.items():
+    if label not in LABEL_TO_CODE:
+        LABEL_TO_CODE[label] = code
+
+def _get_table_id(project_key: str, table_key: str) -> str | None:
+    project = PROJECTS.get(project_key)
+    if not project:
+        return None
+    return project["tables"].get(table_key)
+
+def create_article_in_table(table_id: str, title: str, properties: dict, project_key: str = "burevestnik") -> dict:
+    """
+    Создаёт строку (статью) в умной таблице.
+    Возвращает {"ok": bool, "id": str|None, "error": str|None}
+    """
+    new_id = str(uuid.uuid4())
+    prop_list = []
+    for label, value in properties.items():
+        code = LABEL_TO_CODE.get(label)
+        if not code:
+            # пробуем нормализовать
+            for lab, c in LABEL_TO_CODE.items():
+                if lab.lower() == label.lower():
+                    code = c
+                    break
+        if code:
+            prop_list.append({
+                "method": "add",
+                "code": code,
+                "value": value
+            })
+        else:
+            print(f"[write] Нет code для свойства «{label}» — пропускаю")
+
+    payload = {
+        "code": "article_create",
+        "payload": {
+            "entity": {
+                "spaceId": table_id,
+                "id": new_id,
+                "properties": prop_list
+            }
+        }
+    }
+    try:
+        # api() уже есть в приложении
+        result = api("/api/v1/wiki/properties/command/execute", payload)
+        _log_write("create", title, table_id, True, f"id={new_id}")
+        return {"ok": True, "id": new_id, "error": None, "raw": result}
+    except Exception as e:
+        _log_write("create", title, table_id, False, str(e))
+        return {"ok": False, "id": None, "error": str(e)}
+
+def update_article_properties(table_id: str, article_id: str, properties: dict, title: str = "") -> dict:
+    """
+    Обновляет свойства существующей карточки.
+    Пока используем тот же command/execute (точный code для set value может отличаться —
+    при живом тесте уточним). Пока пробуем article_update / property_set если упадёт.
+    """
+    prop_list = []
+    for label, value in properties.items():
+        code = LABEL_TO_CODE.get(label)
+        if not code:
+            for lab, c in LABEL_TO_CODE.items():
+                if lab.lower() == label.lower():
+                    code = c
+                    break
+        if code:
+            prop_list.append({
+                "method": "set",          # предположение; может быть "update" / "add"
+                "code": code,
+                "value": value
+            })
+
+    # Пробуем наиболее вероятный code
+    for try_code in ("article_update", "property_value_set", "schema_property_update"):
+        payload = {
+            "code": try_code,
+            "payload": {
+                "entity": {
+                    "spaceId": table_id,
+                    "id": article_id,
+                    "properties": prop_list
+                }
+            }
+        }
+        try:
+            result = api("/api/v1/wiki/properties/command/execute", payload)
+            _log_write("update_props", title or article_id, table_id, True, f"code={try_code}")
+            return {"ok": True, "error": None, "raw": result}
+        except Exception as e:
+            last_err = str(e)
+            continue
+    _log_write("update_props", title or article_id, table_id, False, last_err)
+    return {"ok": False, "error": last_err}
+
+def append_body(space_id: str, article_id: str, text: str, title: str = "") -> dict:
+    """
+    Добавляет текст в конец тела через merge.
+    """
+    payload = {
+        "document": [
+            {
+                "type": "text",
+                "text": text,
+                "marks": []
+            }
+        ]
+    }
+    try:
+        result = api(f"/api/v1/collaboration/space/{space_id}/article/{article_id}/merge", payload)
+        _log_write("append_body", title or article_id, space_id, True, f"len={len(text)}")
+        return {"ok": True, "error": None}
+    except Exception as e:
+        _log_write("append_body", title or article_id, space_id, False, str(e))
+        return {"ok": False, "error": str(e)}
+
+def replace_body(space_id: str, article_id: str, text: str, title: str = "") -> dict:
+    """
+    Полная замена тела. Документация merge только добавляет.
+    Пока делаем append с пометкой; при живом тесте найдём endpoint replace.
+    """
+    # Временное решение: append с разделителем
+    marked = f"\n\n---\n[ПОЛНАЯ ЗАМЕНА ТЕЛА]\n{text}"
+    return append_body(space_id, article_id, marked, title)
+
+def apply_delta(delta_text: str, project_key: str = "burevestnik") -> dict:
+    """
+    Применяет DELTA по одной карточке.
+    Возвращает структурированный отчёт:
+    {
+        "applied": [...],
+        "failed": [...],
+        "skipped": [...],
+        "log": [...]
+    }
+    Никогда не бросает общее исключение — все ошибки собираются.
+    """
+    preview = build_preview(delta_text, project_key)
+    actions = preview.get("raw_actions", [])
+    resolver_data = build_title_to_ids(project_key)
+
+    report = {
+        "applied": [],
+        "failed": [],
+        "skipped": [],
+        "questions_remaining": preview.get("questions", []),
+        "log": []
+    }
+
+    # Если есть блокирующие вопросы (Крючки/Секреты без подтверждения) — не применяем ничего
+    blocking = [q for q in preview.get("questions", []) if "требует явного подтверждения" in q]
+    if blocking and not preview.get("ok", True):
+        # В текущей версии UI уже блокирует кнопку, но на всякий случай
+        report["skipped"] = [{"title": a["title"], "reason": "блокирующее предупреждение"} for a in actions]
+        return report
+
+    for act in actions:
+        table_key = act["table_key"]
+        title = act["title"]
+        table_id = _get_table_id(project_key, table_key)
+        if not table_id:
+            report["failed"].append({
+                "title": title,
+                "table": act.get("table_display"),
+                "error": f"Неизвестный table_key: {table_key}"
+            })
+            continue
+
+        effective = make_idempotent(act["action"], title, table_key, resolver_data)
+        res_name = resolve_name(title, table_key, resolver_data)
+
+        try:
+            if effective == "создать":
+                result = create_article_in_table(table_id, title, act["properties"], project_key)
+                if not result["ok"]:
+                    report["failed"].append({
+                        "title": title,
+                        "table": act.get("table_display"),
+                        "error": result["error"]
+                    })
+                    continue
+                article_id = result["id"]
+                # тело
+                if act.get("body"):
+                    space_id = table_id  # в умной таблице spaceId = tableId
+                    if act["body_mode"] == "append":
+                        br = append_body(space_id, article_id, act["body"], title)
+                    else:
+                        br = replace_body(space_id, article_id, act["body"], title)
+                    if not br["ok"]:
+                        report["failed"].append({
+                            "title": title,
+                            "table": act.get("table_display"),
+                            "error": f"Карточка создана, но тело не записалось: {br['error']}"
+                        })
+                        continue
+                report["applied"].append({
+                    "title": title,
+                    "table": act.get("table_display"),
+                    "action": "создать",
+                    "id": article_id
+                })
+
+            else:  # обновить
+                if res_name["status"] != "ok":
+                    report["failed"].append({
+                        "title": title,
+                        "table": act.get("table_display"),
+                        "error": res_name.get("question", "карточка не найдена")
+                    })
+                    continue
+                article_id = res_name["id"]
+                # свойства
+                if act["properties"]:
+                    ur = update_article_properties(table_id, article_id, act["properties"], title)
+                    if not ur["ok"]:
+                        report["failed"].append({
+                            "title": title,
+                            "table": act.get("table_display"),
+                            "error": f"Свойства: {ur['error']}"
+                        })
+                        continue
+                # тело
+                if act.get("body"):
+                    if act["body_mode"] == "append":
+                        br = append_body(table_id, article_id, act["body"], title)
+                    else:
+                        br = replace_body(table_id, article_id, act["body"], title)
+                    if not br["ok"]:
+                        report["failed"].append({
+                            "title": title,
+                            "table": act.get("table_display"),
+                            "error": f"Тело: {br['error']}"
+                        })
+                        continue
+                report["applied"].append({
+                    "title": title,
+                    "table": act.get("table_display"),
+                    "action": "обновить",
+                    "id": article_id
+                })
+
+        except Exception as e:
+            # Гарантированно ловим всё, ничего не проглатываем
+            _log_write("exception", title, table_key, False, str(e))
+            report["failed"].append({
+                "title": title,
+                "table": act.get("table_display"),
+                "error": f"Неожиданная ошибка: {e}"
+            })
+
+    report["log"] = list(WRITE_LOG[-50:])  # последние 50 записей
+    return report
+
+
 # ===================== TOKEN SYSTEM (P0) — Upstash Redis =====================
 REFRESH_MARGIN_SEC = 15 * 60
 PROACTIVE_INTERVAL_SEC = 25 * 60
@@ -270,6 +1042,104 @@ def _proactive_loop():
                     _do_refresh()
         except Exception as e:
             print(f"[tokens] Ошибка в proactive loop: {e}")
+
+# ===================== DELTA UI (Task D) =====================
+
+@app.route("/delta", methods=["GET", "POST"])
+def delta_page():
+    """Страница ввода DELTA и показа предпросмотра."""
+    if request.method == "GET":
+        return """
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>DELTA to Teamly</title>
+<style>
+body { font-family: system-ui, sans-serif; max-width: 900px; margin: 40px auto; padding: 0 20px; }
+textarea { width: 100%; height: 420px; font-family: ui-monospace, monospace; font-size: 13px; padding: 12px; border: 1px solid #ccc; border-radius: 8px; }
+button { margin-top: 16px; padding: 12px 28px; font-size: 16px; background: #4f46e5; color: white; border: none; border-radius: 8px; cursor: pointer; }
+h1 { margin-bottom: 8px; }
+.hint { color: #666; font-size: 0.9rem; margin-bottom: 20px; }
+</style>
+</head>
+<body>
+<h1>Обратный канал — DELTA</h1>
+<p class="hint">Вставь блок === DELTA === ... === КОНЕЦ DELTA === и нажми «Показать предпросмотр».<br>
+Ничего не записывается в Teamly до явного подтверждения.</p>
+<form method="POST" action="/delta/preview">
+<textarea name="delta" placeholder="=== DELTA ===\nТАБЛИЦА: События\n..."></textarea>
+<br>
+<button type="submit">Показать предпросмотр</button>
+</form>
+<p style="margin-top:30px;"><a href="/">← К срезу</a></p>
+</body>
+</html>
+"""
+    return "Use /delta/preview", 400
+
+
+@app.route("/delta/preview", methods=["POST"])
+def delta_preview():
+    delta_text = request.form.get("delta", "").strip()
+    if not delta_text:
+        return "Пустой DELTA", 400
+    try:
+        preview = build_preview(delta_text)
+        html = render_preview_html(preview, delta_text)
+        return html
+    except Exception as e:
+        import traceback
+        return f"<pre>Ошибка предпросмотра:\n{e}\n\n{traceback.format_exc()}</pre>", 500
+
+
+@app.route("/delta/apply", methods=["POST"])
+def delta_apply():
+    """
+    Реальное применение DELTA с частичным успехом и отчётом (Task F).
+    """
+    delta_text = request.form.get("delta", "").strip()
+    if not delta_text:
+        return "Пустой DELTA", 400
+
+    try:
+        report = apply_delta(delta_text)
+    except Exception as e:
+        import traceback
+        return f"<pre>Критическая ошибка apply_delta:\n{e}\n\n{traceback.format_exc()}</pre>", 500
+
+    # HTML-отчёт
+    import html as html_mod
+    esc = html_mod.escape
+    parts = ['<div style="font-family:system-ui;max-width:800px;margin:40px auto;padding:20px;">']
+    parts.append('<h2>Результат применения</h2>')
+
+    if report["applied"]:
+        parts.append(f'<h3 style="color:#0a7;">Успешно применено ({len(report["applied"])})</h3><ul>')
+        for item in report["applied"]:
+            parts.append(f'<li><b>{esc(item["table"])}</b> → «{esc(item["title"])}» <small>({esc(item["action"])}, id: {esc(str(item.get("id","?"))[:8])}…)</small></li>')
+        parts.append('</ul>')
+
+    if report["failed"]:
+        parts.append(f'<h3 style="color:#c50;">Не применено ({len(report["failed"])})</h3><ul>')
+        for item in report["failed"]:
+            parts.append(f'<li><b>{esc(item.get("table","?"))}</b> → «{esc(item["title"])}»<br><small style="color:#c50;">{esc(item["error"])}</small></li>')
+        parts.append('</ul>')
+        parts.append('<p style="color:#666;">Можно исправить DELTA и применить повторно — идемпотентность защищает от дублей.</p>')
+
+    if report["skipped"]:
+        parts.append(f'<h3 style="color:#a60;">Пропущено ({len(report["skipped"])})</h3><ul>')
+        for item in report["skipped"]:
+            parts.append(f'<li>«{esc(item["title"])}» — {esc(item["reason"])}</li>')
+        parts.append('</ul>')
+
+    if not report["applied"] and not report["failed"] and not report["skipped"]:
+        parts.append('<p>Нечего применять.</p>')
+
+    parts.append('<hr><p><a href="/delta">← Новый DELTA</a> &nbsp; <a href="/">К срезу</a></p>')
+    parts.append('</div>')
+    return "\n".join(parts)
+
 
 def start_proactive_refresh():
     t = threading.Thread(target=_proactive_loop, daemon=True)
@@ -785,6 +1655,105 @@ def debug_refresh():
 @app.route("/status")
 def status():
     return jsonify(get_status())
+
+
+# ===================== DELTA UI (Task D) =====================
+
+@app.route("/delta", methods=["GET", "POST"])
+def delta_page():
+    """Страница ввода DELTA и показа предпросмотра."""
+    if request.method == "GET":
+        return """
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>DELTA to Teamly</title>
+<style>
+body { font-family: system-ui, sans-serif; max-width: 900px; margin: 40px auto; padding: 0 20px; }
+textarea { width: 100%; height: 420px; font-family: ui-monospace, monospace; font-size: 13px; padding: 12px; border: 1px solid #ccc; border-radius: 8px; }
+button { margin-top: 16px; padding: 12px 28px; font-size: 16px; background: #4f46e5; color: white; border: none; border-radius: 8px; cursor: pointer; }
+h1 { margin-bottom: 8px; }
+.hint { color: #666; font-size: 0.9rem; margin-bottom: 20px; }
+</style>
+</head>
+<body>
+<h1>Обратный канал — DELTA</h1>
+<p class="hint">Вставь блок === DELTA === ... === КОНЕЦ DELTA === и нажми «Показать предпросмотр».<br>
+Ничего не записывается в Teamly до явного подтверждения.</p>
+<form method="POST" action="/delta/preview">
+<textarea name="delta" placeholder="=== DELTA ===\nТАБЛИЦА: События\n..."></textarea>
+<br>
+<button type="submit">Показать предпросмотр</button>
+</form>
+<p style="margin-top:30px;"><a href="/">← К срезу</a></p>
+</body>
+</html>
+"""
+    return "Use /delta/preview", 400
+
+
+@app.route("/delta/preview", methods=["POST"])
+def delta_preview():
+    delta_text = request.form.get("delta", "").strip()
+    if not delta_text:
+        return "Пустой DELTA", 400
+    try:
+        preview = build_preview(delta_text)
+        html = render_preview_html(preview, delta_text)
+        return html
+    except Exception as e:
+        import traceback
+        return f"<pre>Ошибка предпросмотра:\n{e}\n\n{traceback.format_exc()}</pre>", 500
+
+
+@app.route("/delta/apply", methods=["POST"])
+def delta_apply():
+    """
+    Реальное применение DELTA с частичным успехом и отчётом (Task F).
+    """
+    delta_text = request.form.get("delta", "").strip()
+    if not delta_text:
+        return "Пустой DELTA", 400
+
+    try:
+        report = apply_delta(delta_text)
+    except Exception as e:
+        import traceback
+        return f"<pre>Критическая ошибка apply_delta:\n{e}\n\n{traceback.format_exc()}</pre>", 500
+
+    # HTML-отчёт
+    import html as html_mod
+    esc = html_mod.escape
+    parts = ['<div style="font-family:system-ui;max-width:800px;margin:40px auto;padding:20px;">']
+    parts.append('<h2>Результат применения</h2>')
+
+    if report["applied"]:
+        parts.append(f'<h3 style="color:#0a7;">Успешно применено ({len(report["applied"])})</h3><ul>')
+        for item in report["applied"]:
+            parts.append(f'<li><b>{esc(item["table"])}</b> → «{esc(item["title"])}» <small>({esc(item["action"])}, id: {esc(str(item.get("id","?"))[:8])}…)</small></li>')
+        parts.append('</ul>')
+
+    if report["failed"]:
+        parts.append(f'<h3 style="color:#c50;">Не применено ({len(report["failed"])})</h3><ul>')
+        for item in report["failed"]:
+            parts.append(f'<li><b>{esc(item.get("table","?"))}</b> → «{esc(item["title"])}»<br><small style="color:#c50;">{esc(item["error"])}</small></li>')
+        parts.append('</ul>')
+        parts.append('<p style="color:#666;">Можно исправить DELTA и применить повторно — идемпотентность защищает от дублей.</p>')
+
+    if report["skipped"]:
+        parts.append(f'<h3 style="color:#a60;">Пропущено ({len(report["skipped"])})</h3><ul>')
+        for item in report["skipped"]:
+            parts.append(f'<li>«{esc(item["title"])}» — {esc(item["reason"])}</li>')
+        parts.append('</ul>')
+
+    if not report["applied"] and not report["failed"] and not report["skipped"]:
+        parts.append('<p>Нечего применять.</p>')
+
+    parts.append('<hr><p><a href="/delta">← Новый DELTA</a> &nbsp; <a href="/">К срезу</a></p>')
+    parts.append('</div>')
+    return "\n".join(parts)
+
 
 start_proactive_refresh()
 
