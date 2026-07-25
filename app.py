@@ -288,7 +288,7 @@ def api(endpoint, payload):
             "Content-Type": "application/json"
         },
         json=payload,
-        timeout=60
+        timeout=90
     )
     if r.status_code != 200:
         if r.status_code == 401:
