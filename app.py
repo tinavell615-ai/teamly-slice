@@ -780,9 +780,18 @@ def build_properties_payload(properties: dict, resolver_data: dict | None = None
                 r = resolve_name(clean, rel_table, resolver_data)
                 if r["status"] == "ok":
                     ids.append(r["id"])
+                    print(f"[write] связь «{n}» → {r['id']}")
                 else:
-                    print(f"[write] связь «{n}» не резолвнута: {r.get('question')}")
-            value = ids
+                    print(f"[write] связь «{n}» НЕ резолвнута: {r.get('question')}")
+            # Формат value для binding:
+            # - одиночные поля (Родительское…): один id-строка
+            # - мульти: список id
+            is_single = any(x in low for x in ("родител", "родительская"))
+            if is_single:
+                value = ids[0] if ids else None
+            else:
+                value = ids
+            print(f"[write] binding «{label}» single={is_single} value={value!r}")
 
         # 3. Number
         elif label in ("Хронопорядок",):
