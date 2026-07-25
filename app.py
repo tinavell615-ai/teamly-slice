@@ -615,7 +615,6 @@ def create_article_in_table(table_id: str, title: str, properties: dict, project
     for label, value in properties.items():
         code = LABEL_TO_CODE.get(label)
         if not code:
-            # пробуем нормализовать
             for lab, c in LABEL_TO_CODE.items():
                 if lab.lower() == label.lower():
                     code = c
@@ -629,24 +628,59 @@ def create_article_in_table(table_id: str, title: str, properties: dict, project
         else:
             print(f"[write] Нет code для свойства «{label}» — пропускаю")
 
-    payload = {
-        "code": "article_create",
-        "payload": {
-            "entity": {
-                "spaceId": table_id,
-                "id": new_id,
-                "properties": prop_list
+    # Пробуем несколько вариантов payload — Teamly требует title
+    payloads_to_try = [
+        # вариант 1: title внутри entity + properties
+        {
+            "code": "article_create",
+            "payload": {
+                "entity": {
+                    "spaceId": table_id,
+                    "id": new_id,
+                    "title": title,
+                    "properties": prop_list
+                }
             }
-        }
-    }
-    try:
-        # api() уже есть в приложении
-        result = api("/api/v1/wiki/properties/command/execute", payload)
-        _log_write("create", title, table_id, True, f"id={new_id}")
-        return {"ok": True, "id": new_id, "error": None, "raw": result}
-    except Exception as e:
-        _log_write("create", title, table_id, False, str(e))
-        return {"ok": False, "id": None, "error": str(e)}
+        },
+        # вариант 2: title как отдельное свойство (некоторые схемы)
+        {
+            "code": "article_create",
+            "payload": {
+                "entity": {
+                    "spaceId": table_id,
+                    "id": new_id,
+                    "properties": [{"method": "add", "code": "title", "value": title}] + prop_list
+                }
+            }
+        },
+        # вариант 3: оригинальный (без title) — на случай если предыдущие упадут
+        {
+            "code": "article_create",
+            "payload": {
+                "entity": {
+                    "spaceId": table_id,
+                    "id": new_id,
+                    "properties": prop_list
+                }
+            }
+        },
+    ]
+
+    last_err = None
+    for i, payload in enumerate(payloads_to_try):
+        try:
+            print(f"[write] create attempt {i+1}: title={title!r}, props={len(prop_list)}")
+            result = api("/api/v1/wiki/properties/command/execute", payload)
+            print(f"[write] create response: {str(result)[:300]}")
+            _log_write("create", title, table_id, True, f"id={new_id} attempt={i+1}")
+            return {"ok": True, "id": new_id, "error": None, "raw": result}
+        except Exception as e:
+            last_err = str(e)
+            print(f"[write] create attempt {i+1} failed: {e}")
+            continue
+
+    _log_write("create", title, table_id, False, last_err or "all attempts failed")
+    return {"ok": False, "id": None, "error": last_err or "all attempts failed"}
 
 def update_article_properties(table_id: str, article_id: str, properties: dict, title: str = "") -> dict:
     """
@@ -706,8 +740,12 @@ def append_body(space_id: str, article_id: str, text: str, title: str = "") -> d
     }
     try:
         result = api(f"/api/v1/collaboration/space/{space_id}/article/{article_id}/merge", payload)
+        # пустой ответ при 200/204 считаем успехом
+        if isinstance(result, dict) and result.get("_empty"):
+            _log_write("append_body", title or article_id, space_id, True, f"len={len(text)} empty_ok")
+            return {"ok": True, "error": None}
         _log_write("append_body", title or article_id, space_id, True, f"len={len(text)}")
-        return {"ok": True, "error": None}
+        return {"ok": True, "error": None, "raw": result}
     except Exception as e:
         _log_write("append_body", title or article_id, space_id, False, str(e))
         return {"ok": False, "error": str(e)}
@@ -1160,11 +1198,18 @@ def api(endpoint, payload):
         json=payload,
         timeout=90
     )
-    if r.status_code != 200:
+    print(f"[API] {r.status_code} {endpoint} body_len={len(r.text)}")
+    if r.status_code not in (200, 201, 204):
         if r.status_code == 401:
             print("[API] 401 Unauthorized — токен истёк или refresh не удался")
-        raise Exception(f"API {r.status_code}: {r.text[:300]}")
-    return r.json()
+        raise Exception(f"API {r.status_code}: {r.text[:400]}")
+    if not r.text or not r.text.strip():
+        return {"_empty": True, "status": r.status_code}
+    try:
+        return r.json()
+    except Exception as e:
+        print(f"[API] JSON parse failed: {e}, raw[:200]={r.text[:200]!r}")
+        return {"_raw": r.text[:500], "status": r.status_code}
 
 def extract_text(editor):
     if not editor:
