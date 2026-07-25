@@ -647,17 +647,25 @@ def slice():
             try:
                 card = get_card_full(chid)
                 props = card.get("properties") or {}
+                print(f"[slice] Глава «{card.get('title', chid)}» keys: {list(props.keys())}")
                 found = 0
                 for k, v in props.items():
                     if not isinstance(v, list):
+                        # maybe single id
+                        if isinstance(v, str) and v in by_id:
+                            selected_event_ids.append(v)
+                            found += 1
                         continue
                     for item in v:
                         if isinstance(item, dict) and "id" in item:
                             eid = item["id"]
-                            if eid in by_id:  # это событие
+                            if eid in by_id:
                                 selected_event_ids.append(eid)
                                 found += 1
-                print(f"[slice] Глава {card.get('title', chid)} → {found} событий")
+                        elif isinstance(item, str) and item in by_id:
+                            selected_event_ids.append(item)
+                            found += 1
+                print(f"[slice] Глава «{card.get('title', chid)}» → {found} событий")
             except Exception as e:
                 print(f"[slice] Ошибка резолва главы {chid}: {e}")
 
