@@ -110,6 +110,7 @@ def nav_html(active: str = "") -> str:
     items = [
         ("/", "Срез", "slice"),
         ("/delta", "Запись (DELTA)", "delta"),
+        ("/delta/bulk", "Массовая", "bulk"),
         ("/status", "Статус", "status"),
     ]
     parts = ['<nav style="font-family:system-ui;padding:12px 20px;background:#1e1e2e;margin-bottom:24px;">']
@@ -1232,6 +1233,268 @@ def _proactive_loop():
         except Exception as e:
             print(f"[tokens] Ошибка в proactive loop: {e}")
 
+
+# ===================== BULK / TWO-PASS (Task H) =====================
+import threading
+from datetime import datetime, timezone
+
+JOBS = {}
+JOBS_LOCK = threading.Lock()
+THROTTLE_SEC = 0.08  # ~12 req/s, устойчивость без долбёжки
+
+def _job_log(job, msg):
+    ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    line = f"[{ts}] {msg}"
+    job["log"].append(line)
+    print(f"[bulk {job['id'][:8]}] {msg}")
+
+def split_two_pass(actions: list) -> tuple:
+    """
+    Проход 1: create/update без relation-полей.
+    Проход 2: только relation-поля (для create — update после появления id;
+              для update — сразу property_update).
+    """
+    pass1, pass2 = [], []
+    for act in actions:
+        props = act.get("properties") or {}
+        plain = {k: v for k, v in props.items() if not _is_relation_label(k)}
+        rels  = {k: v for k, v in props.items() if _is_relation_label(k)}
+        a1 = dict(act)
+        a1["properties"] = plain
+        a1["_rels"] = rels
+        pass1.append(a1)
+        if rels:
+            a2 = dict(act)
+            a2["properties"] = rels
+            a2["_plain_done"] = True
+            pass2.append(a2)
+    return pass1, pass2
+
+def estimate_requests(pass1, pass2) -> dict:
+    creates = sum(1 for a in pass1 if a.get("action") in ("создать", "create") or True)
+    # грубо: create+body на каждую pass1, + property_update на каждое rel-поле
+    n1 = len(pass1) * 2  # create + body (если есть)
+    n2 = sum(len(a.get("properties") or {}) for a in pass2)
+    return {
+        "pass1_est": n1,
+        "pass2_est": n2,
+        "total_est": n1 + n2,
+        "cards": len(pass1),
+        "rel_ops": n2,
+    }
+
+def build_bulk_summary(actions: list) -> dict:
+    by_table = {}
+    for a in actions:
+        t = a.get("table_display") or a.get("table") or "?"
+        by_table.setdefault(t, {"create": 0, "update": 0})
+        act = (a.get("action") or "создать").lower()
+        if act in ("обновить", "update"):
+            by_table[t]["update"] += 1
+        else:
+            by_table[t]["create"] += 1
+    return by_table
+
+def run_bulk_job(job_id: str):
+    """Фоновый runner: pass1 → pass2, с троттлингом и журналом."""
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+    if not job:
+        return
+    try:
+        project_key = job.get("project_key", "burevestnik")
+        project = PROJECTS[project_key]
+        resolver_data = build_title_to_ids(project_key)
+        title_to_id = {}  # (table_key, normalize_title(title)) → article_id
+
+        # ----- PASS 1 -----
+        job["status"] = "pass1"
+        _job_log(job, f"Проход 1: {len(job['pass1'])} карточек")
+        for i, act in enumerate(job["pass1"]):
+            if job.get("cancel"):
+                job["status"] = "cancelled"
+                _job_log(job, "Отменено пользователем")
+                return
+            title = act.get("title") or ""
+            table_key = act.get("table_key") or act.get("table") or ""
+            table_id = project["tables"].get(table_key)
+            if not table_id:
+                # resolve table from display name
+                for k, disp in TABLE_DISPLAY.items():
+                    if disp == act.get("table_display") or k == table_key:
+                        table_key = k
+                        table_id = project["tables"].get(k)
+                        break
+            if not table_id:
+                job["errors"].append({"title": title, "error": f"нет table_id для {table_key}"})
+                job["done"] += 1
+                continue
+
+            # идемпотентность
+            effective = act.get("action", "создать")
+            existing = None
+            try:
+                from_resolver = resolve_name(title, table_key, resolver_data)
+                if from_resolver.get("status") == "ok":
+                    existing = from_resolver["id"]
+                    effective = "обновить"
+            except Exception:
+                pass
+
+            try:
+                if effective in ("создать", "create") and not existing:
+                    result = create_article_in_table(
+                        table_id, title, act.get("properties") or {},
+                        project_key, resolver_data, table_key
+                    )
+                    if not result["ok"]:
+                        job["errors"].append({"title": title, "error": result["error"]})
+                    else:
+                        aid = result["id"]
+                        title_to_id[(table_key, normalize_title(title))] = aid
+                        if act.get("body"):
+                            time.sleep(THROTTLE_SEC)
+                            append_body(table_id, aid, act["body"], title)
+                        _job_log(job, f"create OK «{title}»")
+                else:
+                    aid = existing
+                    title_to_id[(table_key, normalize_title(title))] = aid
+                    if act.get("properties"):
+                        ur = update_article_properties(
+                            table_id, aid, act["properties"], title, resolver_data, table_key
+                        )
+                        if not ur["ok"]:
+                            job["errors"].append({"title": title, "error": f"props: {ur['error']}"})
+                    if act.get("body"):
+                        time.sleep(THROTTLE_SEC)
+                        if act.get("body_mode") == "replace":
+                            try:
+                                replace_body(table_id, aid, act["body"], title)
+                            except NameError:
+                                append_body(table_id, aid, act["body"], title)
+                        else:
+                            append_body(table_id, aid, act["body"], title)
+                    _job_log(job, f"update OK «{title}»")
+            except Exception as e:
+                job["errors"].append({"title": title, "error": str(e)[:200]})
+                _job_log(job, f"FAIL «{title}»: {e}")
+
+            job["done"] += 1
+            time.sleep(THROTTLE_SEC)
+
+        # ----- PASS 2: relations -----
+        job["status"] = "pass2"
+        job["pass2_done"] = 0
+        _job_log(job, f"Проход 2: {len(job['pass2'])} карточек со связями")
+        # обновить resolver — новые id
+        resolver_data = build_title_to_ids(project_key)
+
+        for act in job["pass2"]:
+            if job.get("cancel"):
+                job["status"] = "cancelled"
+                return
+            title = act.get("title") or ""
+            table_key = act.get("table_key") or ""
+            table_id = project["tables"].get(table_key)
+            if not table_id:
+                for k, disp in TABLE_DISPLAY.items():
+                    if disp == act.get("table_display"):
+                        table_key = k
+                        table_id = project["tables"].get(k)
+                        break
+            aid = title_to_id.get((table_key, normalize_title(title)))
+            if not aid:
+                r = resolve_name(title, table_key, resolver_data)
+                if r.get("status") == "ok":
+                    aid = r["id"]
+            if not aid:
+                job["errors"].append({"title": title, "error": "нет id для прохода 2"})
+                job["pass2_done"] += 1
+                job["done"] += 1
+                continue
+            try:
+                ur = update_article_properties(
+                    table_id, aid, act.get("properties") or {}, title, resolver_data, table_key
+                )
+                if not ur["ok"]:
+                    job["errors"].append({"title": title, "error": f"rels: {ur['error']}"})
+                else:
+                    _job_log(job, f"rels OK «{title}»")
+            except Exception as e:
+                job["errors"].append({"title": title, "error": str(e)[:200]})
+            job["pass2_done"] += 1
+            job["done"] += 1
+            time.sleep(THROTTLE_SEC)
+
+        job["status"] = "done"
+        _job_log(job, f"Готово. ошибок: {len(job['errors'])}")
+    except Exception as e:
+        job["status"] = "error"
+        job["fatal"] = str(e)
+        _job_log(job, f"FATAL: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+def start_bulk_job(delta_text: str, tables_filter: list | None = None,
+                   project_key: str = "burevestnik") -> dict:
+    actions = parse_delta(delta_text)
+    # filter tables
+    if tables_filter:
+        allowed = set(tables_filter)
+        filtered = []
+        for a in actions:
+            tk = a.get("table_key") or ""
+            td = a.get("table_display") or ""
+            if tk in allowed or td in allowed:
+                filtered.append(a)
+            else:
+                # try map display
+                for k, disp in TABLE_DISPLAY.items():
+                    if disp == td and k in allowed:
+                        filtered.append(a)
+                        break
+        actions = filtered
+
+    pass1, pass2 = split_two_pass(actions)
+    est = estimate_requests(pass1, pass2)
+    summary = build_bulk_summary(actions)
+    job_id = str(uuid.uuid4())
+    job = {
+        "id": job_id,
+        "status": "queued",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "total": len(pass1) + len(pass2),
+        "done": 0,
+        "pass2_done": 0,
+        "errors": [],
+        "log": [],
+        "summary": summary,
+        "estimate": est,
+        "pass1": pass1,
+        "pass2": pass2,
+        "project_key": project_key,
+        "cancel": False,
+    }
+    with JOBS_LOCK:
+        JOBS[job_id] = job
+    t = threading.Thread(target=run_bulk_job, args=(job_id,), daemon=True)
+    t.start()
+    return job
+
+# TABLE_DISPLAY helper if missing
+try:
+    TABLE_DISPLAY
+except NameError:
+    TABLE_DISPLAY = {
+        "characters": "Персонажи",
+        "world": "Мир",
+        "locations": "Локации",
+        "events": "События",
+        "chapters": "Главы / Части",
+    }
+
+
 # ===================== DELTA UI (Task D) =====================
 
 @app.route("/delta", methods=["GET", "POST"])
@@ -1925,6 +2188,176 @@ def debug_schema(table_key):
     except Exception as e:
         import traceback
         return f"<pre>{e}\n{traceback.format_exc()}</pre>", 500
+
+
+
+@app.route("/delta/bulk", methods=["GET", "POST"])
+def delta_bulk():
+    """Массовая заливка: предпросмотр сводки → запуск фонового job."""
+    if request.method == "GET":
+        return f"""<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8"><title>Массовая запись</title>
+<style>
+body{{font-family:system-ui;max-width:900px;margin:0 auto;padding:0 20px 40px}}
+textarea{{width:100%;height:280px;font-family:ui-monospace,monospace;font-size:13px;padding:12px;border:1px solid #ccc;border-radius:8px}}
+button{{margin-top:12px;padding:12px 24px;font-size:15px;background:#4f46e5;color:#fff;border:none;border-radius:8px;cursor:pointer}}
+.checks label{{display:inline-block;margin-right:16px;margin-top:8px}}
+</style></head><body>
+{nav_html("delta")}
+<h1>Массовая запись (два прохода)</h1>
+<p style="color:#666">Проход 1 — карточки без связей. Проход 2 — все связи. Работает в фоне.</p>
+<form method="POST" action="/delta/bulk/preview">
+<textarea name="delta" placeholder="=== DELTA ===&#10;..."></textarea>
+<div class="checks">
+<p><b>Таблицы:</b></p>
+<label><input type="checkbox" name="tables" value="characters" checked> Персонажи</label>
+<label><input type="checkbox" name="tables" value="locations" checked> Локации</label>
+<label><input type="checkbox" name="tables" value="events" checked> События</label>
+<label><input type="checkbox" name="tables" value="chapters" checked> Главы</label>
+<label><input type="checkbox" name="tables" value="world" checked> Мир</label>
+</div>
+<br><button type="submit">Сводка и оценка</button>
+</form>
+</body></html>"""
+
+    return "POST /delta/bulk/preview", 400
+
+
+@app.route("/delta/bulk/preview", methods=["POST"])
+def delta_bulk_preview():
+    delta_text = request.form.get("delta", "").strip()
+    tables = request.form.getlist("tables")
+    if not delta_text:
+        return "Пустой DELTA", 400
+    try:
+        actions = parse_delta(delta_text)
+        if tables:
+            allowed = set(tables)
+            actions = [a for a in actions if a.get("table_key") in allowed]
+        pass1, pass2 = split_two_pass(actions)
+        est = estimate_requests(pass1, pass2)
+        summary = build_bulk_summary(actions)
+        # warnings from validate if available
+        warnings = []
+        try:
+            prev = build_preview(delta_text)
+            warnings = prev.get("warnings") or prev.get("questions") or []
+        except Exception:
+            pass
+
+        rows = "".join(
+            f"<tr><td>{html_escape(t)}</td><td>{v['create']}</td><td>{v['update']}</td></tr>"
+            for t, v in summary.items()
+        )
+        warn_html = ""
+        if warnings:
+            warn_html = "<h3 style='color:#b45309'>Предупреждения</h3><ul>" + \
+                "".join(f"<li>{html_escape(str(w))}</li>" for w in warnings[:50]) + "</ul>"
+
+        tables_hidden = "".join(f'<input type="hidden" name="tables" value="{html_escape(t)}">' for t in tables)
+        import html as H
+        # use manual escape
+        def esc(s):
+            return str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+
+        rows = "".join(
+            f"<tr><td>{esc(t)}</td><td>{v['create']}</td><td>{v['update']}</td></tr>"
+            for t, v in summary.items()
+        )
+        warn_html = ""
+        if warnings:
+            warn_html = "<h3 style='color:#b45309'>Предупреждения</h3><ul>" + \
+                "".join(f"<li>{esc(w)}</li>" for w in warnings[:50]) + "</ul>"
+        tables_hidden = "".join(f'<input type="hidden" name="tables" value="{esc(t)}">' for t in tables)
+
+        secs = est["total_est"] * (THROTTLE_SEC + 0.15)
+        return f"""<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8"><title>Сводка</title>
+<style>
+body{{font-family:system-ui;max-width:900px;margin:0 auto;padding:0 20px 40px}}
+table{{border-collapse:collapse;width:100%}} th,td{{border:1px solid #ddd;padding:8px;text-align:left}}
+button{{padding:12px 24px;background:#059669;color:#fff;border:none;border-radius:8px;font-size:15px;cursor:pointer}}
+</style></head><body>
+{nav_html("delta")}
+<h1>Сводка массовой записи</h1>
+<table><tr><th>Таблица</th><th>Создать</th><th>Обновить</th></tr>{rows}</table>
+<p>Карточек: <b>{est['cards']}</b> · операций связей: <b>{est['rel_ops']}</b> ·
+оценка запросов: ~{est['total_est']} · оценка времени: ~{int(secs)} сек ({secs/60:.1f} мин)</p>
+{warn_html}
+<form method="POST" action="/delta/bulk/start">
+<input type="hidden" name="delta" value="{esc(delta_text)}">
+{tables_hidden}
+<button type="submit">Запустить в фоне</button>
+<a href="/delta/bulk" style="margin-left:16px">← Назад</a>
+</form>
+</body></html>"""
+    except Exception as e:
+        import traceback
+        return f"<pre>{e}\n{traceback.format_exc()}</pre>", 500
+
+
+@app.route("/delta/bulk/start", methods=["POST"])
+def delta_bulk_start():
+    delta_text = request.form.get("delta", "").strip()
+    tables = request.form.getlist("tables")
+    if not delta_text:
+        return "Пустой DELTA", 400
+    job = start_bulk_job(delta_text, tables_filter=tables or None)
+    return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta http-equiv="refresh" content="2;url=/delta/job/{job['id']}">
+<title>Запуск</title></head><body style="font-family:system-ui;padding:40px">
+{nav_html("delta")}
+<p>Job {job['id'][:8]}… запущен. Переход к прогрессу…</p>
+<a href="/delta/job/{job['id']}">Открыть прогресс</a>
+</body></html>"""
+
+
+@app.route("/delta/job/<job_id>")
+def delta_job_page(job_id):
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+    if not job:
+        return "Job не найден (сервер мог перезапуститься — журнал in-memory)", 404
+    total = max(job["total"], 1)
+    pct = int(100 * job["done"] / total)
+    errs = "".join(f"<li>{e.get('title','?')}: {e.get('error','')}</li>" for e in job["errors"][:30])
+    log_tail = "<br>".join(job["log"][-25:])
+    refresh = "" if job["status"] in ("done", "error", "cancelled") else '<meta http-equiv="refresh" content="3">'
+    return f"""<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8">{refresh}
+<title>Прогресс {job_id[:8]}</title>
+<style>
+body{{font-family:system-ui;max-width:900px;margin:0 auto;padding:0 20px 40px}}
+.bar{{height:22px;background:#e5e7eb;border-radius:8px;overflow:hidden}}
+.fill{{height:100%;background:#4f46e5;width:{pct}%}}
+.log{{font-family:ui-monospace,monospace;font-size:12px;background:#f9fafb;padding:12px;border-radius:8px;max-height:320px;overflow:auto}}
+</style></head><body>
+{nav_html("delta")}
+<h1>Прогресс · {job["status"]}</h1>
+<p>{job["done"]} / {job["total"]} ({pct}%) · ошибок: {len(job["errors"])}</p>
+<div class="bar"><div class="fill"></div></div>
+<p style="color:#666;font-size:13px">pass2: {job.get("pass2_done",0)}</p>
+{"<h3 style=color:#b91c1c>Ошибки</h3><ul>"+errs+"</ul>" if job["errors"] else ""}
+<h3>Журнал</h3>
+<div class="log">{log_tail}</div>
+<p style="margin-top:20px"><a href="/delta/bulk">← Массовая запись</a> · <a href="/delta">DELTA</a></p>
+</body></html>"""
+
+
+@app.route("/api/job/<job_id>")
+def api_job(job_id):
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+    if not job:
+        return {"error": "not found"}, 404
+    return {
+        "id": job["id"],
+        "status": job["status"],
+        "done": job["done"],
+        "total": job["total"],
+        "errors": len(job["errors"]),
+        "log_tail": job["log"][-10:],
+    }
 
 
 if __name__ == "__main__":
