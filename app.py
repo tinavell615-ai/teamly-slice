@@ -31,6 +31,48 @@ PROJECTS = {
     }
 }
 
+
+# Маппинг внутренних ID свойств Teamly → читаемые названия
+# Зафиксировано по реальному срезу 25.07.2026. Стабильно, как ID таблиц.
+PROPERTY_LABELS = {
+    # События
+    "Ik4p": "Участники",
+    "K3b5": "Участники",
+    "Vfxy": "Локация",
+    "nNmi": "Локация",
+    "4LZq": "ID",
+    "B4zM": "Хронопорядок",
+    "K714": "Эпоха/Слой",
+    "lcVz": "Статус",
+    "uHqz": "Узловой",
+    # Персонажи
+    "QWXk": "Связи",
+    "Y7ne": "Связи",
+    "eXYm": "События",
+    "yB3V": "События",
+    "vLi4": "Локации",
+    "x919": "Локации",
+    "VX3t": "Артефакты/Силы",
+    "8LHF": "ID",
+    "LC5w": "Год/Возраст",
+    "MNDf": "Статус",
+    "Mtec": "Слой",
+    "pAOs": "Тип",
+    # Локации
+    "747P": "Связанные персонажи",
+    "8iC3": "Связанные события",
+    "ZOKQ": "Связанные персонажи",
+    "xe2X": "Связанные события",
+    "hVwM": "Дочерние локации",
+    "y5Br": "Родительская локация",
+    "0sAM": "Арки/Главы",
+    "i8cY": "Связанные сущности",
+    "2chV": "Тип",
+    "NcYD": "Слой",
+    "ghta": "Родитель",
+    "re5V": "Статус",
+}
+
 VOLUME_LIMITS = {
     "compact": 45000,
     "working": 110000,
@@ -335,28 +377,28 @@ def resolve_relation(val, id_to_title):
     return ", ".join(names) if names else None
 
 def format_card(card, id_to_title):
-    """Формирует блок карточки с резолвнутыми связями."""
+    """Формирует блок карточки с резолвнутыми связями и человеческими названиями полей."""
     lines = [f"### {card['title']}"]
     props = card.get("properties") or {}
     
-    # Собираем интересные поля
     meta = []
     relations = []
     
     for k, v in props.items():
-        k_lower = str(k).lower()
-        # Простые значения (статус, флаги, числа)
-        if not isinstance(v, (list, dict)):
-            if v is not None and str(v).strip():
-                meta.append(f"{k}: {v}")
+        label = PROPERTY_LABELS.get(k, k)  # если неизвестно — оставляем как есть
+        # Пропускаем чисто технические ID
+        if label in ("ID",) or k in ("4LZq", "8LHF"):
             continue
-        # Relation
+        if not isinstance(v, (list, dict)):
+            if v is not None and str(v).strip() and str(v) not in ("None", "null"):
+                meta.append(f"{label}: {v}")
+            continue
         resolved = resolve_relation(v, id_to_title)
         if resolved is not None:
-            relations.append(f"{k}: {resolved}")
+            relations.append(f"{label}: {resolved}")
     
     if meta:
-        lines.append(" | ".join(meta[:6]))  # не раздуваем
+        lines.append(" | ".join(meta[:8]))
     for r in relations:
         lines.append(r)
     
