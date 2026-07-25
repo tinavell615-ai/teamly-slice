@@ -227,9 +227,6 @@ def _do_refresh():
         _state["last_error"] = None
         _state["source"] = "refresh"
         _save_to_file()
-        # Обновляем Variable в Railway, чтобы пережить любой рестарт
-        if _state.get("refresh_token"):
-            _update_railway_refresh_token(_state["refresh_token"])
 
         print("=" * 60)
         print("[tokens] УСПЕШНЫЙ REFRESH")
@@ -649,6 +646,22 @@ def slice():
     filename = f"slice_{project_key}_{datetime.now().strftime('%Y%m%d_%H%M')}.md"
     return Response(text, mimetype="text/markdown",
                     headers={"Content-Disposition": f"attachment; filename={filename}"})
+
+
+
+@app.route("/debug/refresh")
+def debug_refresh():
+    key = request.args.get("key", "")
+    if key != "tvell-debug-2026":
+        return jsonify({"error": "forbidden"}), 403
+    try:
+        with _lock:
+            ok = _do_refresh()
+            st = get_status()
+            st["force_refresh_ok"] = ok
+            return jsonify(st)
+    except Exception as e:
+        return jsonify({"error": str(e), "force_refresh_ok": False}), 500
 
 
 @app.route("/status")
