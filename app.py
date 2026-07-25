@@ -35,19 +35,17 @@ PROJECTS = {
 # Маппинг внутренних ID свойств Teamly → читаемые названия
 # Зафиксировано по реальному срезу 25.07.2026. Стабильно, как ID таблиц.
 PROPERTY_LABELS = {
-    # === События (актуально по schema 25.07.2026) ===
-    "lcVz": "Узловой?",
-    "K714": "Статус",
+    # События
+    "Ik4p": "Участники",
+    "K3b5": "Участники",
+    "Vfxy": "Локация",
+    "nNmi": "Локация",
+    "4LZq": "ID",
     "B4zM": "Хронопорядок",
-    "4LZq": "Эпоха / Слой",
-    "uHqz": "Источник",
-    "Ik4p": "Персонажи",
-    "K3b5": "Связанные персонажи",
-    "nNmi": "Локации",
-    "Vfxy": "Связанные локации",
-    "poqo": "Родительское событие",
-    "GVsw": "Главы / Части",
-    # === Персонажи (оставляем прежние, уточним отдельно) ===
+    "K714": "Эпоха/Слой",
+    "lcVz": "Статус",
+    "uHqz": "Узловой",
+    # Персонажи
     "QWXk": "Связи",
     "Y7ne": "Связи",
     "eXYm": "События",
@@ -60,7 +58,7 @@ PROPERTY_LABELS = {
     "MNDf": "Статус",
     "Mtec": "Слой",
     "pAOs": "Тип",
-    # === Локации ===
+    # Локации
     "747P": "Связанные персонажи",
     "8iC3": "Связанные события",
     "ZOKQ": "Связанные персонажи",
@@ -75,54 +73,11 @@ PROPERTY_LABELS = {
     "re5V": "Статус",
 }
 
-# Опции select-полей: label → {text_lower → option_id}
-# Актуально для таблицы События
-SELECT_OPTIONS = {
-    "Узловой?": {
-        "да": "065699cb-1056-4a2a-97de-d76dac77ec87",
-        "нет": "d40b53f8-4462-4dce-b10f-90161dc8ea3d",
-    },
-    "Статус": {
-        "закрыто": "b7d66dea-38dd-4aac-bc28-cdbc7fd1f0d0",
-        "зафиксировано": "c462d63c-052d-4f1e-83f7-3b5e84a2c681",
-    },
-    "Эпоха / Слой": {
-        "1948": "f72382d9-e0eb-47ab-9a53-e8df5ebbc0ad",
-        "1954": "1edfd476-a35d-4fe3-94ef-8f1d8a83cd6e",
-        "1955": "ac18f047-a2c6-4fe0-b908-c91b8f5d5609",
-        "1961": "6f518aad-a6f8-404b-a9a9-c224d77c48dd",
-        "1961 (24.12)": "2e46e1de-3e6f-4d49-a8b0-70f6f376ae4e",
-    },
-    "Источник": {
-        "автор": "0c2e45d4-ad1f-4f07-a39f-860e65d5ee38",
-    },
-}
-
 VOLUME_LIMITS = {
     "compact": 45000,
     "working": 110000,
     "full": 999999
 }
-
-
-def nav_html(active: str = "") -> str:
-    """Простая навигация между срезом и DELTA."""
-    items = [
-        ("/", "Срез", "slice"),
-        ("/delta", "Запись (DELTA)", "delta"),
-        ("/delta/bulk", "Массовая", "bulk"),
-        ("/delta/jobs", "Журнал", "jobs"),
-        ("/status", "Статус", "status"),
-    ]
-    parts = ['<nav style="font-family:system-ui;padding:12px 20px;background:#1e1e2e;margin-bottom:24px;">']
-    for href, label, key in items:
-        if key == active:
-            parts.append(f'<a href="{href}" style="color:#fff;font-weight:600;margin-right:20px;text-decoration:none;border-bottom:2px solid #7c3aed;padding-bottom:4px;">{label}</a>')
-        else:
-            parts.append(f'<a href="{href}" style="color:#a1a1aa;margin-right:20px;text-decoration:none;">{label}</a>')
-    parts.append('</nav>')
-    return "".join(parts)
-
 
 # ===================== NAME RESOLVER (Task C) =====================
 import re
@@ -559,8 +514,7 @@ def render_preview_html(preview: dict, delta_text: str) -> str:
     import html as html_mod
     esc = html_mod.escape
 
-    parts = [nav_html("delta")]
-    parts.append('<div style="font-family: system-ui, sans-serif; max-width: 900px; margin: 20px auto; padding: 20px;">')
+    parts = ['<div style="font-family: system-ui, sans-serif; max-width: 900px; margin: 20px auto; padding: 20px;">']
     parts.append('<h2>Предпросмотр изменений</h2>')
 
     if preview["creates"]:
@@ -651,231 +605,91 @@ def _get_table_id(project_key: str, table_key: str) -> str | None:
         return None
     return project["tables"].get(table_key)
 
-def create_article_in_table(table_id: str, title: str, properties: dict, project_key: str = "burevestnik", resolver_data: dict | None = None, table_key: str = "") -> dict:
+def create_article_in_table(table_id: str, title: str, properties: dict, project_key: str = "burevestnik") -> dict:
     """
     Создаёт строку (статью) в умной таблице.
     Возвращает {"ok": bool, "id": str|None, "error": str|None}
     """
     new_id = str(uuid.uuid4())
-    prop_list = build_properties_payload(properties, resolver_data, table_key)
+    prop_list = []
+    for label, value in properties.items():
+        code = LABEL_TO_CODE.get(label)
+        if not code:
+            # пробуем нормализовать
+            for lab, c in LABEL_TO_CODE.items():
+                if lab.lower() == label.lower():
+                    code = c
+                    break
+        if code:
+            prop_list.append({
+                "method": "add",
+                "code": code,
+                "value": value
+            })
+        else:
+            print(f"[write] Нет code для свойства «{label}» — пропускаю")
 
-    # Пробуем несколько вариантов payload — Teamly требует title
-    payloads_to_try = [
-        # вариант 1: title внутри entity + properties
-        {
-            "code": "article_create",
-            "payload": {
-                "entity": {
-                    "spaceId": table_id,
-                    "id": new_id,
-                    "title": title,
-                    "properties": prop_list
-                }
+    payload = {
+        "code": "article_create",
+        "payload": {
+            "entity": {
+                "spaceId": table_id,
+                "id": new_id,
+                "properties": prop_list
             }
-        },
-        # вариант 2: title как отдельное свойство (некоторые схемы)
-        {
-            "code": "article_create",
-            "payload": {
-                "entity": {
-                    "spaceId": table_id,
-                    "id": new_id,
-                    "properties": [{"method": "add", "code": "title", "value": title}] + prop_list
-                }
-            }
-        },
-        # вариант 3: оригинальный (без title) — на случай если предыдущие упадут
-        {
-            "code": "article_create",
-            "payload": {
-                "entity": {
-                    "spaceId": table_id,
-                    "id": new_id,
-                    "properties": prop_list
-                }
-            }
-        },
-    ]
+        }
+    }
+    try:
+        # api() уже есть в приложении
+        result = api("/api/v1/wiki/properties/command/execute", payload)
+        _log_write("create", title, table_id, True, f"id={new_id}")
+        return {"ok": True, "id": new_id, "error": None, "raw": result}
+    except Exception as e:
+        _log_write("create", title, table_id, False, str(e))
+        return {"ok": False, "id": None, "error": str(e)}
 
-    last_err = None
-    for i, payload in enumerate(payloads_to_try):
-        try:
-            print(f"[write] create attempt {i+1}: title={title!r}, props={len(prop_list)}")
-            result = api("/api/v1/wiki/properties/command/execute", payload)
-            print(f"[write] create response: {str(result)[:300]}")
-            _log_write("create", title, table_id, True, f"id={new_id} attempt={i+1}")
-            return {"ok": True, "id": new_id, "error": None, "raw": result}
-        except Exception as e:
-            last_err = str(e)
-            print(f"[write] create attempt {i+1} failed: {e}")
-            continue
-
-    _log_write("create", title, table_id, False, last_err or "all attempts failed")
-    return {"ok": False, "id": None, "error": last_err or "all attempts failed"}
-
-PROP_ALIASES = {
-    "локация": "Связанные локации",
-    "локации": "Связанные локации",
-    "связанные локации": "Связанные локации",
-    # в таблице События видимая колонка = Связанные персонажи (K3b5)
-    "участники": "Связанные персонажи",
-    "персонаж": "Связанные персонажи",
-    "персонажи": "Связанные персонажи",
-    "связанные персонажи": "Связанные персонажи",
-    "родитель": "Родительское событие",
-    "родительское событие": "Родительское событие",
-    "узловой": "Узловой?",
-    "эпоха": "Эпоха / Слой",
-    "слой": "Эпоха / Слой",
-}
-
-def _resolve_prop_code(label: str) -> str | None:
-    canon = PROP_ALIASES.get(label.lower().rstrip("?").strip(), label)
-    code = LABEL_TO_CODE.get(canon)
-    if code:
-        return code
-    code = LABEL_TO_CODE.get(label)
-    if code:
-        return code
-    norm = label.lower().rstrip("?").strip()
-    for lab, c in LABEL_TO_CODE.items():
-        if lab.lower().rstrip("?").strip() == norm:
-            return c
-    return None
-
-def _is_relation_label(label: str) -> bool:
-    low = label.lower()
-    return any(x in low for x in (
-        "участник", "pov", "локац", "родител", "связан", "глав", "событи", "персонаж"
-    ))
-
-def build_properties_payload(properties: dict, resolver_data: dict | None = None, table_key: str = "") -> list:
+def update_article_properties(table_id: str, article_id: str, properties: dict, title: str = "") -> dict:
     """
-    Формирует список properties для command/execute.
-    - select → option id
-    - binding/relation → list of article ids
-    - number/text → as-is
+    Обновляет свойства существующей карточки.
+    Пока используем тот же command/execute (точный code для set value может отличаться —
+    при живом тесте уточним). Пока пробуем article_update / property_set если упадёт.
     """
     prop_list = []
     for label, value in properties.items():
-        code = _resolve_prop_code(label)
+        code = LABEL_TO_CODE.get(label)
         if not code:
-            print(f"[write] Нет code для «{label}» — пропускаю")
-            continue
-
-        # 1. Select: текст → option id
-        sel_key = None
-        if label in SELECT_OPTIONS:
-            sel_key = label
-        else:
-            for k in SELECT_OPTIONS:
-                if k.lower().rstrip("?").strip() == label.lower().rstrip("?").strip():
-                    sel_key = k
+            for lab, c in LABEL_TO_CODE.items():
+                if lab.lower() == label.lower():
+                    code = c
                     break
-        if sel_key:
-            opts = SELECT_OPTIONS[sel_key]
-            key = str(value).strip().lower()
-            if key in opts:
-                value = opts[key]
-                print(f"[write] select «{label}»={key} → {value}")
-            else:
-                print(f"[write] select «{label}»: неизвестная опция «{value}», варианты: {list(opts.keys())}")
+        if code:
+            prop_list.append({
+                "method": "set",          # предположение; может быть "update" / "add"
+                "code": code,
+                "value": value
+            })
 
-        # 2. Связи / binding: имена → id
-        elif _is_relation_label(label) and resolver_data is not None:
-            names = [n.strip() for n in re.split(r'[,;]', str(value)) if n.strip()]
-            ids = []
-            low = label.lower()
-            if any(x in low for x in ("участник", "pov", "персонаж")):
-                rel_table = "characters"
-            elif any(x in low for x in ("локац",)):
-                rel_table = "locations"
-            elif "родител" in low:
-                rel_table = "events"
-            elif "глав" in low:
-                rel_table = "chapters"
-            else:
-                rel_table = table_key or "events"
-            for n in names:
-                clean = re.sub(r'\s*[\(\[\{].*?[\)\]\}]\s*', '', n).strip()
-                r = resolve_name(clean, rel_table, resolver_data)
-                if r["status"] == "ok":
-                    ids.append(r["id"])
-                    print(f"[write] связь «{n}» → {r['id']}")
-                else:
-                    print(f"[write] связь «{n}» НЕ резолвнута: {r.get('question')}")
-            if not ids:
-                print(f"[write] binding «{label}»: нет id — пропускаю свойство")
-                continue  # не добавляем в prop_list
-            # Teamly binding: список объектов {id: ...}
-            value = [{"id": i} for i in ids]
-            print(f"[write] binding «{label}» value={value!r}")
-
-        # 3. Number
-        elif label in ("Хронопорядок",):
-            try:
-                value = int(str(value).replace(" ", "").replace(",", ""))
-            except ValueError:
-                pass
-
-        prop_list.append({
-            "method": "add",
-            "code": code,
-            "value": value
-        })
-    return prop_list
-
-def update_article_properties(table_id: str, article_id: str, properties: dict, title: str = "",
-                               resolver_data: dict | None = None, table_key: str = "") -> dict:
-    """
-    Обновляет свойства существующей карточки.
-    Живой формат Teamly (перехват UI 25.07.2026):
-    code: property_update
-    entity: {spaceId, articleId}
-    operation: {method: update, code, value}
-    Каждое свойство — отдельный вызов.
-    """
-    prop_list = build_properties_payload(properties, resolver_data, table_key)
-    if not prop_list:
-        return {"ok": True, "error": None}
-
-    errors = []
-    ok_count = 0
-    for p in prop_list:
+    # Пробуем наиболее вероятный code
+    for try_code in ("article_update", "property_value_set", "schema_property_update"):
         payload = {
-            "code": "property_update",
-            "internal": False,
+            "code": try_code,
             "payload": {
                 "entity": {
                     "spaceId": table_id,
-                    "articleId": article_id
-                },
-                "operation": {
-                    "method": "update",
-                    "code": p["code"],
-                    "value": p["value"]
+                    "id": article_id,
+                    "properties": prop_list
                 }
             }
         }
         try:
             result = api("/api/v1/wiki/properties/command/execute", payload)
-            print(f"[write] property_update {p['code']} OK: {str(result)[:150]}")
-            ok_count += 1
+            _log_write("update_props", title or article_id, table_id, True, f"code={try_code}")
+            return {"ok": True, "error": None, "raw": result}
         except Exception as e:
-            err = str(e)
-            print(f"[write] property_update {p['code']} FAIL: {err[:200]}")
-            errors.append(f"{p['code']}: {err[:120]}")
-
-    if ok_count == len(prop_list):
-        _log_write("update_props", title or article_id, table_id, True, f"ok={ok_count}")
-        return {"ok": True, "error": None}
-    if ok_count > 0:
-        _log_write("update_props", title or article_id, table_id, True, f"partial ok={ok_count} err={errors}")
-        return {"ok": True, "error": f"частично: {'; '.join(errors)}"}
-    _log_write("update_props", title or article_id, table_id, False, str(errors))
-    return {"ok": False, "error": "; ".join(errors)}
-
-
+            last_err = str(e)
+            continue
+    _log_write("update_props", title or article_id, table_id, False, last_err)
+    return {"ok": False, "error": last_err}
 
 def append_body(space_id: str, article_id: str, text: str, title: str = "") -> dict:
     """
@@ -892,12 +706,8 @@ def append_body(space_id: str, article_id: str, text: str, title: str = "") -> d
     }
     try:
         result = api(f"/api/v1/collaboration/space/{space_id}/article/{article_id}/merge", payload)
-        # пустой ответ при 200/204 считаем успехом
-        if isinstance(result, dict) and result.get("_empty"):
-            _log_write("append_body", title or article_id, space_id, True, f"len={len(text)} empty_ok")
-            return {"ok": True, "error": None}
         _log_write("append_body", title or article_id, space_id, True, f"len={len(text)}")
-        return {"ok": True, "error": None, "raw": result}
+        return {"ok": True, "error": None}
     except Exception as e:
         _log_write("append_body", title or article_id, space_id, False, str(e))
         return {"ok": False, "error": str(e)}
@@ -959,8 +769,7 @@ def apply_delta(delta_text: str, project_key: str = "burevestnik") -> dict:
 
         try:
             if effective == "создать":
-                # Связи идут вместе с create (формат [{id}] уже выставлен в build_properties_payload)
-                result = create_article_in_table(table_id, title, act["properties"], project_key, resolver_data, table_key)
+                result = create_article_in_table(table_id, title, act["properties"], project_key)
                 if not result["ok"]:
                     report["failed"].append({
                         "title": title,
@@ -1001,7 +810,7 @@ def apply_delta(delta_text: str, project_key: str = "burevestnik") -> dict:
                 article_id = res_name["id"]
                 # свойства
                 if act["properties"]:
-                    ur = update_article_properties(table_id, article_id, act["properties"], title, resolver_data, table_key)
+                    ur = update_article_properties(table_id, article_id, act["properties"], title)
                     if not ur["ok"]:
                         report["failed"].append({
                             "title": title,
@@ -1234,383 +1043,27 @@ def _proactive_loop():
         except Exception as e:
             print(f"[tokens] Ошибка в proactive loop: {e}")
 
-
-# ===================== BULK / TWO-PASS (Task H) =====================
-import threading
-from datetime import datetime, timezone
-
-JOBS = {}
-JOBS_LOCK = threading.Lock()
-THROTTLE_SEC = 0.08  # ~12 req/s, устойчивость без долбёжки
-JOB_KEY_PREFIX = "bulk_job:"
-JOB_INDEX_KEY = "bulk_job_index"
-JOB_TTL_SEC = 60 * 60 * 24 * 7  # 7 дней
-
-def _job_public(job: dict) -> dict:
-    """Сериализуемое состояние без тяжёлых pass1/pass2 списков действий."""
-    return {
-        "id": job["id"],
-        "status": job["status"],
-        "created_at": job.get("created_at"),
-        "total": job.get("total", 0),
-        "done": job.get("done", 0),
-        "pass2_done": job.get("pass2_done", 0),
-        "errors": job.get("errors", [])[:50],
-        "log": job.get("log", [])[-100:],
-        "summary": job.get("summary", {}),
-        "estimate": job.get("estimate", {}),
-        "fatal": job.get("fatal"),
-        "cancel": job.get("cancel", False),
-    }
-
-def _upstash_job_set(job: dict):
-    if not UPSTASH_REDIS_REST_URL or not UPSTASH_REDIS_REST_TOKEN:
-        return
-    try:
-        import json as _json, urllib.parse
-        payload = _job_public(job)
-        # не храним pass1/pass2 в redis — только прогресс
-        raw = _json.dumps(payload, ensure_ascii=False)
-        encoded = urllib.parse.quote(raw, safe="")
-        key = JOB_KEY_PREFIX + job["id"]
-        r = requests.post(
-            f"{UPSTASH_REDIS_REST_URL}/set/{key}/{encoded}/EX/{JOB_TTL_SEC}",
-            headers={"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"},
-            timeout=10,
-        )
-        if r.status_code not in (200, 201):
-            print(f"[job] upstash set fail: {r.status_code} {r.text[:150]}")
-        # index: keep last 30 ids
-        requests.post(
-            f"{UPSTASH_REDIS_REST_URL}/lpush/{JOB_INDEX_KEY}/{job['id']}",
-            headers={"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"},
-            timeout=10,
-        )
-        requests.post(
-            f"{UPSTASH_REDIS_REST_URL}/ltrim/{JOB_INDEX_KEY}/0/29",
-            headers={"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"},
-            timeout=10,
-        )
-    except Exception as e:
-        print(f"[job] upstash set exc: {e}")
-
-def _upstash_job_get(job_id: str) -> dict | None:
-    if not UPSTASH_REDIS_REST_URL or not UPSTASH_REDIS_REST_TOKEN:
-        return None
-    try:
-        import json as _json
-        r = requests.get(
-            f"{UPSTASH_REDIS_REST_URL}/get/{JOB_KEY_PREFIX}{job_id}",
-            headers={"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"},
-            timeout=10,
-        )
-        if r.status_code != 200:
-            return None
-        data = r.json().get("result")
-        if not data:
-            return None
-        if isinstance(data, str):
-            return _json.loads(data)
-        return data
-    except Exception as e:
-        print(f"[job] upstash get exc: {e}")
-        return None
-
-def _upstash_job_list() -> list:
-    if not UPSTASH_REDIS_REST_URL or not UPSTASH_REDIS_REST_TOKEN:
-        return []
-    try:
-        r = requests.get(
-            f"{UPSTASH_REDIS_REST_URL}/lrange/{JOB_INDEX_KEY}/0/19",
-            headers={"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"},
-            timeout=10,
-        )
-        if r.status_code != 200:
-            return []
-        return r.json().get("result") or []
-    except Exception:
-        return []
-
-def _job_log(job, msg):
-    ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
-    line = f"[{ts}] {msg}"
-    job["log"].append(line)
-    print(f"[bulk {job['id'][:8]}] {msg}")
-    # периодически пишем в Upstash (каждые ~5 строк или на финальных статусах)
-    if len(job["log"]) % 5 == 0 or job.get("status") in ("done", "error", "cancelled", "pass2"):
-        _upstash_job_set(job)
-
-def split_two_pass(actions: list) -> tuple:
-    """
-    Проход 1: create/update без relation-полей.
-    Проход 2: только relation-поля (для create — update после появления id;
-              для update — сразу property_update).
-    """
-    pass1, pass2 = [], []
-    for act in actions:
-        props = act.get("properties") or {}
-        plain = {k: v for k, v in props.items() if not _is_relation_label(k)}
-        rels  = {k: v for k, v in props.items() if _is_relation_label(k)}
-        a1 = dict(act)
-        a1["properties"] = plain
-        a1["_rels"] = rels
-        pass1.append(a1)
-        if rels:
-            a2 = dict(act)
-            a2["properties"] = rels
-            a2["_plain_done"] = True
-            pass2.append(a2)
-    return pass1, pass2
-
-def estimate_requests(pass1, pass2) -> dict:
-    creates = sum(1 for a in pass1 if a.get("action") in ("создать", "create") or True)
-    # грубо: create+body на каждую pass1, + property_update на каждое rel-поле
-    n1 = len(pass1) * 2  # create + body (если есть)
-    n2 = sum(len(a.get("properties") or {}) for a in pass2)
-    return {
-        "pass1_est": n1,
-        "pass2_est": n2,
-        "total_est": n1 + n2,
-        "cards": len(pass1),
-        "rel_ops": n2,
-    }
-
-def build_bulk_summary(actions: list) -> dict:
-    by_table = {}
-    for a in actions:
-        t = a.get("table_display") or a.get("table") or "?"
-        by_table.setdefault(t, {"create": 0, "update": 0})
-        act = (a.get("action") or "создать").lower()
-        if act in ("обновить", "update"):
-            by_table[t]["update"] += 1
-        else:
-            by_table[t]["create"] += 1
-    return by_table
-
-def run_bulk_job(job_id: str):
-    """Фоновый runner: pass1 → pass2, с троттлингом и журналом."""
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-    if not job:
-        return
-    try:
-        project_key = job.get("project_key", "burevestnik")
-        project = PROJECTS[project_key]
-        resolver_data = build_title_to_ids(project_key)
-        title_to_id = {}  # (table_key, normalize_title(title)) → article_id
-
-        # ----- PASS 1 -----
-        job["status"] = "pass1"
-        _job_log(job, f"Проход 1: {len(job['pass1'])} карточек")
-        for i, act in enumerate(job["pass1"]):
-            if job.get("cancel"):
-                job["status"] = "cancelled"
-                _job_log(job, "Отменено пользователем")
-                return
-            title = act.get("title") or ""
-            table_key = act.get("table_key") or act.get("table") or ""
-            table_id = project["tables"].get(table_key)
-            if not table_id:
-                # resolve table from display name
-                for k, disp in TABLE_DISPLAY.items():
-                    if disp == act.get("table_display") or k == table_key:
-                        table_key = k
-                        table_id = project["tables"].get(k)
-                        break
-            if not table_id:
-                job["errors"].append({"title": title, "error": f"нет table_id для {table_key}"})
-                job["done"] += 1
-                continue
-
-            # идемпотентность
-            effective = act.get("action", "создать")
-            existing = None
-            try:
-                from_resolver = resolve_name(title, table_key, resolver_data)
-                if from_resolver.get("status") == "ok":
-                    existing = from_resolver["id"]
-                    effective = "обновить"
-            except Exception:
-                pass
-
-            try:
-                if effective in ("создать", "create") and not existing:
-                    result = create_article_in_table(
-                        table_id, title, act.get("properties") or {},
-                        project_key, resolver_data, table_key
-                    )
-                    if not result["ok"]:
-                        job["errors"].append({"title": title, "error": result["error"]})
-                    else:
-                        aid = result["id"]
-                        title_to_id[(table_key, normalize_title(title))] = aid
-                        if act.get("body"):
-                            time.sleep(THROTTLE_SEC)
-                            append_body(table_id, aid, act["body"], title)
-                        _job_log(job, f"create OK «{title}»")
-                else:
-                    aid = existing
-                    title_to_id[(table_key, normalize_title(title))] = aid
-                    if act.get("properties"):
-                        ur = update_article_properties(
-                            table_id, aid, act["properties"], title, resolver_data, table_key
-                        )
-                        if not ur["ok"]:
-                            job["errors"].append({"title": title, "error": f"props: {ur['error']}"})
-                    if act.get("body"):
-                        time.sleep(THROTTLE_SEC)
-                        if act.get("body_mode") == "replace":
-                            try:
-                                replace_body(table_id, aid, act["body"], title)
-                            except NameError:
-                                append_body(table_id, aid, act["body"], title)
-                        else:
-                            append_body(table_id, aid, act["body"], title)
-                    _job_log(job, f"update OK «{title}»")
-            except Exception as e:
-                job["errors"].append({"title": title, "error": str(e)[:200]})
-                _job_log(job, f"FAIL «{title}»: {e}")
-
-            job["done"] += 1
-            time.sleep(THROTTLE_SEC)
-
-        # ----- PASS 2: relations -----
-        job["status"] = "pass2"
-        job["pass2_done"] = 0
-        _job_log(job, f"Проход 2: {len(job['pass2'])} карточек со связями")
-        # обновить resolver — новые id
-        resolver_data = build_title_to_ids(project_key)
-
-        for act in job["pass2"]:
-            if job.get("cancel"):
-                job["status"] = "cancelled"
-                return
-            title = act.get("title") or ""
-            table_key = act.get("table_key") or ""
-            table_id = project["tables"].get(table_key)
-            if not table_id:
-                for k, disp in TABLE_DISPLAY.items():
-                    if disp == act.get("table_display"):
-                        table_key = k
-                        table_id = project["tables"].get(k)
-                        break
-            aid = title_to_id.get((table_key, normalize_title(title)))
-            if not aid:
-                r = resolve_name(title, table_key, resolver_data)
-                if r.get("status") == "ok":
-                    aid = r["id"]
-            if not aid:
-                job["errors"].append({"title": title, "error": "нет id для прохода 2"})
-                job["pass2_done"] += 1
-                job["done"] += 1
-                continue
-            try:
-                ur = update_article_properties(
-                    table_id, aid, act.get("properties") or {}, title, resolver_data, table_key
-                )
-                if not ur["ok"]:
-                    job["errors"].append({"title": title, "error": f"rels: {ur['error']}"})
-                else:
-                    _job_log(job, f"rels OK «{title}»")
-            except Exception as e:
-                job["errors"].append({"title": title, "error": str(e)[:200]})
-            job["pass2_done"] += 1
-            job["done"] += 1
-            time.sleep(THROTTLE_SEC)
-
-        job["status"] = "done"
-        _job_log(job, f"Готово. ошибок: {len(job['errors'])}")
-        _upstash_job_set(job)
-    except Exception as e:
-        job["status"] = "error"
-        job["fatal"] = str(e)
-        _job_log(job, f"FATAL: {e}")
-        import traceback
-        traceback.print_exc()
-
-
-def start_bulk_job(delta_text: str, tables_filter: list | None = None,
-                   project_key: str = "burevestnik") -> dict:
-    actions = parse_delta(delta_text)
-    # filter tables
-    if tables_filter:
-        allowed = set(tables_filter)
-        filtered = []
-        for a in actions:
-            tk = a.get("table_key") or ""
-            td = a.get("table_display") or ""
-            if tk in allowed or td in allowed:
-                filtered.append(a)
-            else:
-                # try map display
-                for k, disp in TABLE_DISPLAY.items():
-                    if disp == td and k in allowed:
-                        filtered.append(a)
-                        break
-        actions = filtered
-
-    pass1, pass2 = split_two_pass(actions)
-    est = estimate_requests(pass1, pass2)
-    summary = build_bulk_summary(actions)
-    job_id = str(uuid.uuid4())
-    job = {
-        "id": job_id,
-        "status": "queued",
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "total": len(pass1) + len(pass2),
-        "done": 0,
-        "pass2_done": 0,
-        "errors": [],
-        "log": [],
-        "summary": summary,
-        "estimate": est,
-        "pass1": pass1,
-        "pass2": pass2,
-        "project_key": project_key,
-        "cancel": False,
-    }
-    with JOBS_LOCK:
-        JOBS[job_id] = job
-    _upstash_job_set(job)
-    t = threading.Thread(target=run_bulk_job, args=(job_id,), daemon=True)
-    t.start()
-    return job
-
-# TABLE_DISPLAY helper if missing
-try:
-    TABLE_DISPLAY
-except NameError:
-    TABLE_DISPLAY = {
-        "characters": "Персонажи",
-        "world": "Мир",
-        "locations": "Локации",
-        "events": "События",
-        "chapters": "Главы / Части",
-    }
-
-
 # ===================== DELTA UI (Task D) =====================
 
 @app.route("/delta", methods=["GET", "POST"])
 def delta_page():
     """Страница ввода DELTA и показа предпросмотра."""
     if request.method == "GET":
-        return f"""
+        return """
 <!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
 <title>DELTA to Teamly</title>
 <style>
-body {{ font-family: system-ui, sans-serif; max-width: 900px; margin: 0 auto; padding: 0 20px 40px; }}
-textarea {{ width: 100%; height: 420px; font-family: ui-monospace, monospace; font-size: 13px; padding: 12px; border: 1px solid #ccc; border-radius: 8px; }}
-button {{ margin-top: 16px; padding: 12px 28px; font-size: 16px; background: #4f46e5; color: white; border: none; border-radius: 8px; cursor: pointer; }}
-h1 {{ margin-bottom: 8px; }}
-.hint {{ color: #666; font-size: 0.9rem; margin-bottom: 20px; }}
+body { font-family: system-ui, sans-serif; max-width: 900px; margin: 40px auto; padding: 0 20px; }
+textarea { width: 100%; height: 420px; font-family: ui-monospace, monospace; font-size: 13px; padding: 12px; border: 1px solid #ccc; border-radius: 8px; }
+button { margin-top: 16px; padding: 12px 28px; font-size: 16px; background: #4f46e5; color: white; border: none; border-radius: 8px; cursor: pointer; }
+h1 { margin-bottom: 8px; }
+.hint { color: #666; font-size: 0.9rem; margin-bottom: 20px; }
 </style>
 </head>
 <body>
-{nav_html("delta")}
 <h1>Обратный канал — DELTA</h1>
 <p class="hint">Вставь блок === DELTA === ... === КОНЕЦ DELTA === и нажми «Показать предпросмотр».<br>
 Ничего не записывается в Teamly до явного подтверждения.</p>
@@ -1619,6 +1072,7 @@ h1 {{ margin-bottom: 8px; }}
 <br>
 <button type="submit">Показать предпросмотр</button>
 </form>
+<p style="margin-top:30px;"><a href="/">← К срезу</a></p>
 </body>
 </html>
 """
@@ -1657,8 +1111,7 @@ def delta_apply():
     # HTML-отчёт
     import html as html_mod
     esc = html_mod.escape
-    parts = [nav_html("delta")]
-    parts.append('<div style="font-family:system-ui;max-width:800px;margin:40px auto;padding:20px;">')
+    parts = ['<div style="font-family:system-ui;max-width:800px;margin:40px auto;padding:20px;">']
     parts.append('<h2>Результат применения</h2>')
 
     if report["applied"]:
@@ -1707,18 +1160,11 @@ def api(endpoint, payload):
         json=payload,
         timeout=90
     )
-    print(f"[API] {r.status_code} {endpoint} body_len={len(r.text)}")
-    if r.status_code not in (200, 201, 204):
+    if r.status_code != 200:
         if r.status_code == 401:
             print("[API] 401 Unauthorized — токен истёк или refresh не удался")
-        raise Exception(f"API {r.status_code}: {r.text[:400]}")
-    if not r.text or not r.text.strip():
-        return {"_empty": True, "status": r.status_code}
-    try:
-        return r.json()
-    except Exception as e:
-        print(f"[API] JSON parse failed: {e}, raw[:200]={r.text[:200]!r}")
-        return {"_raw": r.text[:500], "status": r.status_code}
+        raise Exception(f"API {r.status_code}: {r.text[:300]}")
+    return r.json()
 
 def extract_text(editor):
     if not editor:
@@ -1991,7 +1437,6 @@ def index():
     </style>
 </head>
 <body>
-""" + nav_html("slice") + """
     <h1>Срез базы Teamly</h1>
     <p class="hint">Выбери арки/главы — система подтянет то, что было до них</p>
 
@@ -2212,276 +1657,139 @@ def status():
     return jsonify(get_status())
 
 
+# ===================== DELTA UI (Task D) =====================
+
+@app.route("/delta", methods=["GET", "POST"])
+def delta_page():
+    """Страница ввода DELTA и показа предпросмотра."""
+    if request.method == "GET":
+        return """
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>DELTA to Teamly</title>
+<style>
+body { font-family: system-ui, sans-serif; max-width: 900px; margin: 40px auto; padding: 0 20px; }
+textarea { width: 100%; height: 420px; font-family: ui-monospace, monospace; font-size: 13px; padding: 12px; border: 1px solid #ccc; border-radius: 8px; }
+button { margin-top: 16px; padding: 12px 28px; font-size: 16px; background: #4f46e5; color: white; border: none; border-radius: 8px; cursor: pointer; }
+h1 { margin-bottom: 8px; }
+.hint { color: #666; font-size: 0.9rem; margin-bottom: 20px; }
+</style>
+</head>
+<body>
+<h1>Обратный канал — DELTA</h1>
+<p class="hint">Вставь блок === DELTA === ... === КОНЕЦ DELTA === и нажми «Показать предпросмотр».<br>
+Ничего не записывается в Teamly до явного подтверждения.</p>
+<form method="POST" action="/delta/preview">
+<textarea name="delta" placeholder="=== DELTA ===\nТАБЛИЦА: События\n..."></textarea>
+<br>
+<button type="submit">Показать предпросмотр</button>
+</form>
+<p style="margin-top:30px;"><a href="/">← К срезу</a></p>
+</body>
+</html>
+"""
+    return "Use /delta/preview", 400
+
+
+@app.route("/delta/preview", methods=["POST"])
+def delta_preview():
+    delta_text = request.form.get("delta", "").strip()
+    if not delta_text:
+        return "Пустой DELTA", 400
+    try:
+        preview = build_preview(delta_text)
+        html = render_preview_html(preview, delta_text)
+        return html
+    except Exception as e:
+        import traceback
+        return f"<pre>Ошибка предпросмотра:\n{e}\n\n{traceback.format_exc()}</pre>", 500
+
+
+@app.route("/delta/apply", methods=["POST"])
+def delta_apply():
+    """
+    Реальное применение DELTA с частичным успехом и отчётом (Task F).
+    """
+    delta_text = request.form.get("delta", "").strip()
+    if not delta_text:
+        return "Пустой DELTA", 400
+
+    try:
+        report = apply_delta(delta_text)
+    except Exception as e:
+        import traceback
+        return f"<pre>Критическая ошибка apply_delta:\n{e}\n\n{traceback.format_exc()}</pre>", 500
+
+    # HTML-отчёт
+    import html as html_mod
+    esc = html_mod.escape
+    parts = ['<div style="font-family:system-ui;max-width:800px;margin:40px auto;padding:20px;">']
+    parts.append('<h2>Результат применения</h2>')
+
+    if report["applied"]:
+        parts.append(f'<h3 style="color:#0a7;">Успешно применено ({len(report["applied"])})</h3><ul>')
+        for item in report["applied"]:
+            parts.append(f'<li><b>{esc(item["table"])}</b> → «{esc(item["title"])}» <small>({esc(item["action"])}, id: {esc(str(item.get("id","?"))[:8])}…)</small></li>')
+        parts.append('</ul>')
+
+    if report["failed"]:
+        parts.append(f'<h3 style="color:#c50;">Не применено ({len(report["failed"])})</h3><ul>')
+        for item in report["failed"]:
+            parts.append(f'<li><b>{esc(item.get("table","?"))}</b> → «{esc(item["title"])}»<br><small style="color:#c50;">{esc(item["error"])}</small></li>')
+        parts.append('</ul>')
+        parts.append('<p style="color:#666;">Можно исправить DELTA и применить повторно — идемпотентность защищает от дублей.</p>')
+
+    if report["skipped"]:
+        parts.append(f'<h3 style="color:#a60;">Пропущено ({len(report["skipped"])})</h3><ul>')
+        for item in report["skipped"]:
+            parts.append(f'<li>«{esc(item["title"])}» — {esc(item["reason"])}</li>')
+        parts.append('</ul>')
+
+    if not report["applied"] and not report["failed"] and not report["skipped"]:
+        parts.append('<p>Нечего применять.</p>')
+
+    parts.append('<hr><p><a href="/delta">← Новый DELTA</a> &nbsp; <a href="/">К срезу</a></p>')
+    parts.append('</div>')
+    return "\n".join(parts)
+
 
 start_proactive_refresh()
 
+# ===================== PROVISION v7 (T3) =====================
+try:
+    from provision_v7 import provision_space
+except ImportError:
+    provision_space = None
 
-@app.route("/debug/props/<article_id>")
-def debug_props(article_id):
-    """Сырые свойства карточки + schema таблицы События."""
+CONTAINER_ID = "6aea92ec-e669-436f-8c5f-8c282eae0355"  # из разведки 26.07.2026
+
+@app.route("/provision", methods=["GET"])
+def provision_endpoint():
+    """
+    Тестовый провижининг пространства по схеме v7.
+    Требует ?confirm=1
+    Создаёт пространство «Детективный движок v7 — тест» + все таблицы + колонки + связи.
+    """
+    if request.args.get("confirm") != "1":
+        return """
+        <h2>Провижининг v7</h2>
+        <p>Это создаст <b>новое</b> пространство со всеми 12 таблицами схемы v7.</p>
+        <p>Для запуска добавь <code>?confirm=1</code> к URL.</p>
+        <p><a href="/provision?confirm=1">Запустить провижининг</a></p>
+        <p><a href="/">← Назад</a></p>
+        """, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+    if provision_space is None:
+        return jsonify({"error": "provision_v7.py не найден"}), 500
+
+    title = "Детективный движок v7 — тест " + datetime.now().strftime("%H:%M")
     try:
-        card = api("/api/v1/wiki/ql/article", {
-            "query": {
-                "__filter": {"id": article_id},
-                "id": True,
-                "title": True,
-                "properties": {"properties": True},
-                "schemaProperties": True
-            }
-        })
-        # schema таблицы
-        table_id = PROJECTS["burevestnik"]["tables"]["events"]
-        schema = api("/api/v1/ql/content-database/content", {
-            "query": {
-                "__filter": {"contentDatabaseId": table_id},
-                "schemaProperties": {
-                    "id": True, "name": True, "type": True, "code": True,
-                    "format": True, "options": True, "propertyId": True
-                }
-            }
-        })
-        import json
-        return f"<pre>{json.dumps({'card': card, 'schema_sample': schema}, ensure_ascii=False, indent=2)[:15000]}</pre>"
+        result = provision_space(api, title, CONTAINER_ID)
+        return jsonify(result), 200
     except Exception as e:
-        import traceback
-        return f"<pre>{e}\n{traceback.format_exc()}</pre>", 500
-
-
-
-@app.route("/debug/schema/<table_key>")
-def debug_schema(table_key):
-    """Схема свойств таблицы."""
-    table_id = PROJECTS["burevestnik"]["tables"].get(table_key)
-    if not table_id:
-        return f"Unknown table: {table_key}", 404
-    try:
-        data = api("/api/v1/ql/content-database/content", {
-            "query": {
-                "__filter": {"contentDatabaseId": table_id},
-                "schemaProperties": {
-                    "id": True, "name": True, "type": True, "code": True,
-                    "format": True, "options": True, "propertyId": True,
-                    "protected": True, "hide": True
-                }
-            }
-        })
-        import json
-        props = data.get("schemaProperties", [])
-        # compact view
-        compact = []
-        for p in props:
-            compact.append({
-                "name": p.get("name"),
-                "code": p.get("code"),
-                "type": p.get("type"),
-                "format": p.get("format"),
-                "options": p.get("options"),
-                "propertyId": p.get("propertyId")
-            })
-        return f"<pre>{json.dumps(compact, ensure_ascii=False, indent=2)}</pre>"
-    except Exception as e:
-        import traceback
-        return f"<pre>{e}\n{traceback.format_exc()}</pre>", 500
-
-
-
-@app.route("/delta/bulk", methods=["GET", "POST"])
-def delta_bulk():
-    """Массовая заливка: предпросмотр сводки → запуск фонового job."""
-    if request.method == "GET":
-        return f"""<!DOCTYPE html>
-<html lang="ru"><head><meta charset="utf-8"><title>Массовая запись</title>
-<style>
-body{{font-family:system-ui;max-width:900px;margin:0 auto;padding:0 20px 40px}}
-textarea{{width:100%;height:280px;font-family:ui-monospace,monospace;font-size:13px;padding:12px;border:1px solid #ccc;border-radius:8px}}
-button{{margin-top:12px;padding:12px 24px;font-size:15px;background:#4f46e5;color:#fff;border:none;border-radius:8px;cursor:pointer}}
-.checks label{{display:inline-block;margin-right:16px;margin-top:8px}}
-</style></head><body>
-{nav_html("delta")}
-<h1>Массовая запись (два прохода)</h1>
-<p style="color:#666">Проход 1 — карточки без связей. Проход 2 — все связи. Работает в фоне.</p>
-<form method="POST" action="/delta/bulk/preview">
-<textarea name="delta" placeholder="=== DELTA ===&#10;..."></textarea>
-<div class="checks">
-<p><b>Таблицы:</b></p>
-<label><input type="checkbox" name="tables" value="characters" checked> Персонажи</label>
-<label><input type="checkbox" name="tables" value="locations" checked> Локации</label>
-<label><input type="checkbox" name="tables" value="events" checked> События</label>
-<label><input type="checkbox" name="tables" value="chapters" checked> Главы</label>
-<label><input type="checkbox" name="tables" value="world" checked> Мир</label>
-</div>
-<br><button type="submit">Сводка и оценка</button>
-</form>
-</body></html>"""
-
-    return "POST /delta/bulk/preview", 400
-
-
-@app.route("/delta/bulk/preview", methods=["POST"])
-def delta_bulk_preview():
-    delta_text = request.form.get("delta", "").strip()
-    tables = request.form.getlist("tables")
-    if not delta_text:
-        return "Пустой DELTA", 400
-    try:
-        actions = parse_delta(delta_text)
-        if tables:
-            allowed = set(tables)
-            actions = [a for a in actions if a.get("table_key") in allowed]
-        pass1, pass2 = split_two_pass(actions)
-        est = estimate_requests(pass1, pass2)
-        summary = build_bulk_summary(actions)
-        # warnings from validate if available
-        warnings = []
-        try:
-            prev = build_preview(delta_text)
-            warnings = prev.get("warnings") or prev.get("questions") or []
-        except Exception:
-            pass
-
-        def esc(s):
-            return str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;")
-
-        rows = "".join(
-            f"<tr><td>{esc(t)}</td><td>{v['create']}</td><td>{v['update']}</td></tr>"
-            for t, v in summary.items()
-        )
-        warn_html = ""
-        if warnings:
-            warn_html = "<h3 style='color:#b45309'>Предупреждения</h3><ul>" + \
-                "".join(f"<li>{esc(w)}</li>" for w in warnings[:50]) + "</ul>"
-        tables_hidden = "".join(f'<input type="hidden" name="tables" value="{esc(t)}">' for t in tables)
-
-        secs = est["total_est"] * (THROTTLE_SEC + 0.15)
-        return f"""<!DOCTYPE html>
-<html lang="ru"><head><meta charset="utf-8"><title>Сводка</title>
-<style>
-body{{font-family:system-ui;max-width:900px;margin:0 auto;padding:0 20px 40px}}
-table{{border-collapse:collapse;width:100%}} th,td{{border:1px solid #ddd;padding:8px;text-align:left}}
-button{{padding:12px 24px;background:#059669;color:#fff;border:none;border-radius:8px;font-size:15px;cursor:pointer}}
-</style></head><body>
-{nav_html("delta")}
-<h1>Сводка массовой записи</h1>
-<table><tr><th>Таблица</th><th>Создать</th><th>Обновить</th></tr>{rows}</table>
-<p>Карточек: <b>{est['cards']}</b> · операций связей: <b>{est['rel_ops']}</b> ·
-оценка запросов: ~{est['total_est']} · оценка времени: ~{int(secs)} сек ({secs/60:.1f} мин)</p>
-{warn_html}
-<form method="POST" action="/delta/bulk/start">
-<input type="hidden" name="delta" value="{esc(delta_text)}">
-{tables_hidden}
-<button type="submit">Запустить в фоне</button>
-<a href="/delta/bulk" style="margin-left:16px">← Назад</a>
-</form>
-</body></html>"""
-    except Exception as e:
-        import traceback
-        return f"<pre>{e}\n{traceback.format_exc()}</pre>", 500
-
-
-@app.route("/delta/bulk/start", methods=["POST"])
-def delta_bulk_start():
-    delta_text = request.form.get("delta", "").strip()
-    tables = request.form.getlist("tables")
-    if not delta_text:
-        return "Пустой DELTA", 400
-    job = start_bulk_job(delta_text, tables_filter=tables or None)
-    return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
-<meta http-equiv="refresh" content="2;url=/delta/job/{job['id']}">
-<title>Запуск</title></head><body style="font-family:system-ui;padding:40px">
-{nav_html("delta")}
-<p>Job {job['id'][:8]}… запущен. Переход к прогрессу…</p>
-<a href="/delta/job/{job['id']}">Открыть прогресс</a>
-</body></html>"""
-
-
-@app.route("/delta/job/<job_id>")
-def delta_job_page(job_id):
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-    if not job:
-        job = _upstash_job_get(job_id)
-    if not job:
-        return "Job не найден", 404
-    total = max(job["total"], 1)
-    pct = int(100 * job["done"] / total)
-    errs = "".join(f"<li>{e.get('title','?')}: {e.get('error','')}</li>" for e in job["errors"][:30])
-    log_tail = "<br>".join(job["log"][-25:])
-    refresh = "" if job["status"] in ("done", "error", "cancelled") else '<meta http-equiv="refresh" content="3">'
-    return f"""<!DOCTYPE html>
-<html lang="ru"><head><meta charset="utf-8">{refresh}
-<title>Прогресс {job_id[:8]}</title>
-<style>
-body{{font-family:system-ui;max-width:900px;margin:0 auto;padding:0 20px 40px}}
-.bar{{height:22px;background:#e5e7eb;border-radius:8px;overflow:hidden}}
-.fill{{height:100%;background:#4f46e5;width:{pct}%}}
-.log{{font-family:ui-monospace,monospace;font-size:12px;background:#f9fafb;padding:12px;border-radius:8px;max-height:320px;overflow:auto}}
-</style></head><body>
-{nav_html("delta")}
-<h1>Прогресс · {job["status"]}</h1>
-<p>{job["done"]} / {job["total"]} ({pct}%) · ошибок: {len(job["errors"])}</p>
-<div class="bar"><div class="fill"></div></div>
-<p style="color:#666;font-size:13px">pass2: {job.get("pass2_done",0)}</p>
-{"<h3 style=color:#b91c1c>Ошибки</h3><ul>"+errs+"</ul>" if job["errors"] else ""}
-<h3>Журнал</h3>
-<div class="log">{log_tail}</div>
-<p style="margin-top:20px"><a href="/delta/bulk">← Массовая запись</a> · <a href="/delta">DELTA</a></p>
-</body></html>"""
-
-
-@app.route("/api/job/<job_id>")
-def api_job(job_id):
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-    if not job:
-        job = _upstash_job_get(job_id)
-    if not job:
-        return {"error": "not found"}, 404
-    return {
-        "id": job["id"],
-        "status": job["status"],
-        "done": job["done"],
-        "total": job["total"],
-        "errors": len(job["errors"]),
-        "log_tail": job["log"][-10:],
-    }
-
-
-
-@app.route("/delta/jobs")
-def delta_jobs_list():
-    ids = _upstash_job_list()
-    # merge with in-memory
-    with JOBS_LOCK:
-        mem_ids = list(JOBS.keys())
-    all_ids = []
-    seen = set()
-    for i in mem_ids + ids:
-        if i not in seen:
-            all_ids.append(i)
-            seen.add(i)
-    rows = []
-    for jid in all_ids[:20]:
-        with JOBS_LOCK:
-            j = JOBS.get(jid)
-        if not j:
-            j = _upstash_job_get(jid)
-        if not j:
-            continue
-        rows.append(
-            f'<tr><td><a href="/delta/job/{j["id"]}">{j["id"][:8]}…</a></td>'
-            f'<td>{j.get("status")}</td><td>{j.get("done",0)}/{j.get("total",0)}</td>'
-            f'<td>{len(j.get("errors") or [])}</td><td>{j.get("created_at","")}</td></tr>'
-        )
-    table = "".join(rows) or "<tr><td colspan=5>Пока нет задач</td></tr>"
-    return f"""<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8"><title>Журнал jobs</title>
-<style>body{{font-family:system-ui;max-width:900px;margin:0 auto;padding:0 20px 40px}}
-table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #ddd;padding:8px}}</style></head>
-<body>{nav_html("delta")}
-<h1>Журнал массовых задач</h1>
-<table><tr><th>ID</th><th>Статус</th><th>Прогресс</th><th>Ошибки</th><th>Создан</th></tr>
-{table}</table>
-<p><a href="/delta/bulk">← Массовая запись</a></p>
-</body></html>"""
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
