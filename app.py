@@ -427,6 +427,21 @@ def format_card(card, id_to_title):
     return "\n".join(lines) + "\n"
 
 
+
+def get_chapters_for_select(table_id):
+    """Список глав/арок для чекбоксов."""
+    try:
+        data = api("/api/v1/ql/content-database/content", {
+            "query": {
+                "__filter": {"contentDatabaseId": table_id},
+                "content": {"article": {"id": True, "title": True}, "hasNested": True}
+            }
+        })
+        return [{"id": i["article"]["id"], "title": i["article"].get("title", "")} for i in data.get("content", [])]
+    except Exception as e:
+        print(f"[index] chapters error: {e}")
+        return []
+
 def get_all_events(table_id):
     """Получаем все события + пытаемся вытащить родителя"""
     data = api("/api/v1/ql/content-database/content", {
@@ -496,7 +511,7 @@ def get_descendants(event_id, children, depth_mode):
     def walk(eid, level):
         for child_id in children.get(eid, []):
             result.append(child_id)
-            if depth_mode == "scenes" or (depth_mode == "chapters" and level < 1):
+            if depth_mode == "scenes" or (depth_mode == "direct_children" and level < 1):
                 walk(child_id, level + 1)
     if depth_mode != "arcs":
         walk(event_id, 0)
@@ -504,26 +519,29 @@ def get_descendants(event_id, children, depth_mode):
 
 @app.route("/", methods=["GET"])
 def index():
-    # Получаем список событий для чекбоксов
+    # Главы / Арки как основной выбор
+    error_msg = None
+    chapter_boxes = ""
+    event_boxes = ""
     try:
+        chapters = get_chapters_for_select(PROJECTS["burevestnik"]["tables"]["chapters"])
+        for ch in chapters:
+            chapter_boxes += f'<label><input type="checkbox" name="chapters" value="{ch["id"]}"> {ch["title"]}</label>\n'
+        
+        # События оставляем как дополнительный режим
         events = get_all_events(PROJECTS["burevestnik"]["tables"]["events"])
-        # Показываем в основном корневые и средние
         by_id, children, roots = build_tree(events)
-        # Берём корни + прямых детей корней для выбора
         selectable = []
         for rid in roots:
             selectable.append(by_id[rid])
-            for cid in children.get(rid, [])[:8]:
+            for cid in children.get(rid, [])[:6]:
                 selectable.append(by_id[cid])
+        for ev in selectable:
+            event_boxes += f'<label><input type="checkbox" name="events" value="{ev["id"]}"> {ev["title"]}</label>\n'
     except Exception as e:
-        selectable = []
         error_msg = str(e)
-    else:
-        error_msg = None
-
-    checkboxes = ""
-    for ev in selectable:
-        checkboxes += f'<label><input type="checkbox" name="events" value="{ev["id"]}"> {ev["title"]}</label>\n'
+        chapter_boxes = ""
+        event_boxes = ""
 
     return f"""
 <!DOCTYPE html>
@@ -570,7 +588,7 @@ def index():
             <strong>Глубина внутри выбранного</strong>
             <select name="depth">
                 <option value="arcs">Только выбранные (без детей)</option>
-                <option value="chapters" selected>Выбранные + прямые дети</option>
+                <option value="direct_children" selected>Выбранные + прямые дети</option>
                 <option value="scenes">Выбранные + вся глубина</option>
             </select>
         </div>
@@ -580,7 +598,7 @@ def index():
             <label><input type="checkbox" name="tables" value="characters" checked> Персонажи</label>
             <label><input type="checkbox" name="tables" value="events" checked> События</label>
             <label><input type="checkbox" name="tables" value="locations" checked> Локации</label>
-            <label><input type="checkbox" name="tables" value="chapters"> Главы / Части</label>
+            <label><input type="checkbox" name="tables" value="direct_children"> Главы / Части</label>
             <label><input type="checkbox" name="tables" value="world"> Мир</label>
         </div>
 
@@ -603,7 +621,8 @@ def index():
 def slice():
     project_key = request.args.get("project", "burevestnik")
     selected_event_ids = request.args.getlist("events")
-    depth = request.args.get("depth", "chapters")
+    selected_chapter_ids = request.args.getlist("chapters")
+    depth = request.args.get("depth", "direct_children")
     volume = request.args.get("volume", "working")
     selected_tables = request.args.getlist("tables") or ["characters", "events", "locations"]
 
@@ -621,7 +640,26 @@ def slice():
     # Определяем, какие события включать
     to_include = set()
 
-    if not selected_event_ids:
+    # Если выбраны главы — резолвим их «Связанные события»
+    if selected_chapter_ids:
+        for chid in selected_chapter_ids:
+            try:
+                card = get_card_full(chid)
+                props = card.get("properties") or {}
+                for k, v in props.items():
+                    label = PROPERTY_LABELS.get(k, k)
+                    if "событ" in label.lower() or k in ("xe2X", "8iC3", "eXYm", "yB3V"):
+                        resolved_ids = []
+                        if isinstance(v, list):
+                            for item in v:
+                                if isinstance(item, dict) and "id" in item:
+                                    resolved_ids.append(item["id"])
+                        for eid in resolved_ids:
+                            selected_event_ids.append(eid)
+            except Exception as e:
+                print(f"[slice] Ошибка резолва главы {chid}: {e}")
+
+    if not selected_event_ids and not selected_chapter_ids:
         # Если ничего не выбрано — берём корни
         selected_event_ids = roots
 
