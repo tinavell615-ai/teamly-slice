@@ -12,9 +12,12 @@ app = Flask(__name__)
 CLIENT_ID = os.environ.get("CLIENT_ID", "")
 CLIENT_SECRET = os.environ.get("CLIENT_SECRET", "")
 INITIAL_REFRESH_TOKEN = os.environ.get("REFRESH_TOKEN", "")
+RAILWAY_API_TOKEN = os.environ.get("RAILWAY_API_TOKEN", "")
 TOKENS_FILE = os.environ.get("TOKENS_FILE", "/tmp/teamly_tokens.json")
 SLUG = "tina-vell"
 CLUSTER = "https://app.teamly.ru"
+RAILWAY_PROJECT_ID = "d12688c9-9438-4622-ad96-fb9c916aa597"
+RAILWAY_GQL = "https://backboard.railway.app/graphql/v2"
 
 PROJECTS = {
     "burevestnik": {
@@ -94,6 +97,93 @@ def _save_to_file():
         print(f"[tokens] НЕ удалось сохранить в {TOKENS_FILE}: {e}")
         return False
 
+
+_railway_env_id = None
+
+def _get_railway_env_id():
+    global _railway_env_id
+    if _railway_env_id:
+        return _railway_env_id
+    if not RAILWAY_API_TOKEN:
+        return None
+    try:
+        q = """
+        query($id: String!) {
+          project(id: $id) {
+            environments {
+              edges { node { id name } }
+            }
+          }
+        }
+        """
+        r = requests.post(
+            RAILWAY_GQL,
+            headers={"Authorization": f"Bearer {RAILWAY_API_TOKEN}", "Content-Type": "application/json"},
+            json={"query": q, "variables": {"id": RAILWAY_PROJECT_ID}},
+            timeout=15
+        )
+        if r.status_code != 200:
+            print(f"[railway] Не удалось получить environments: {r.status_code} {r.text[:200]}")
+            return None
+        data = r.json()
+        edges = data.get("data", {}).get("project", {}).get("environments", {}).get("edges", [])
+        for edge in edges:
+            node = edge.get("node", {})
+            if node.get("name") == "production":
+                _railway_env_id = node["id"]
+                print(f"[railway] environmentId production = {_railway_env_id}")
+                return _railway_env_id
+        print("[railway] production environment не найден")
+        return None
+    except Exception as e:
+        print(f"[railway] Ошибка получения env_id: {e}")
+        return None
+
+def _update_railway_refresh_token(new_refresh: str):
+    """Обновляет Variable REFRESH_TOKEN в Railway, чтобы пережить рестарт."""
+    if not RAILWAY_API_TOKEN or not new_refresh:
+        return False
+    env_id = _get_railway_env_id()
+    if not env_id:
+        print("[railway] Не могу обновить Variable — нет environmentId")
+        return False
+    try:
+        mutation = """
+        mutation($input: VariableUpsertInput!) {
+          variableUpsert(input: $input) {
+            id
+            name
+          }
+        }
+        """
+        variables = {
+            "input": {
+                "projectId": RAILWAY_PROJECT_ID,
+                "environmentId": env_id,
+                "name": "REFRESH_TOKEN",
+                "value": new_refresh
+            }
+        }
+        r = requests.post(
+            RAILWAY_GQL,
+            headers={"Authorization": f"Bearer {RAILWAY_API_TOKEN}", "Content-Type": "application/json"},
+            json={"query": mutation, "variables": variables},
+            timeout=15
+        )
+        if r.status_code != 200:
+            print(f"[railway] Ошибка upsert Variable: {r.status_code} {r.text[:300]}")
+            return False
+        data = r.json()
+        if "errors" in data:
+            print(f"[railway] GraphQL errors: {data['errors']}")
+            return False
+        print("[railway] REFRESH_TOKEN успешно обновлён в Railway Variables")
+        return True
+    except Exception as e:
+        print(f"[railway] EXCEPTION при обновлении Variable: {e}")
+        return False
+
+
 def _do_refresh():
     refresh_token = _state["refresh_token"] or INITIAL_REFRESH_TOKEN
     if not refresh_token:
@@ -129,6 +219,7 @@ def _do_refresh():
         if new_refresh:
             _state["refresh_token"] = new_refresh
             print("[tokens] Получен НОВЫЙ refresh_token (ротация)")
+            _update_railway_refresh_token(new_refresh)
         _state["access_token_expires_at"] = exp
         _state["refresh_token_expires_at"] = rexp
         _state["last_refresh_at"] = _now()
@@ -136,6 +227,10 @@ def _do_refresh():
         _state["last_error"] = None
         _state["source"] = "refresh"
         _save_to_file()
+        # Обновляем Variable в Railway, чтобы пережить любой рестарт
+        if _state.get("refresh_token"):
+            _update_railway_refresh_token(_state["refresh_token"])
+
         print("=" * 60)
         print("[tokens] УСПЕШНЫЙ REFRESH")
         print(f"expires_at = {exp} ({datetime.fromtimestamp(exp)})")
