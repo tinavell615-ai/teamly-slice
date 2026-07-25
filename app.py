@@ -579,7 +579,7 @@ def index():
         <div class="section">
             <strong>Арки / Главы (можно несколько)</strong>
             <div class="checkboxes">
-                {checkboxes if checkboxes else "<p>События не загрузились</p>"}
+                {chapter_boxes if chapter_boxes else "<p>Главы не загрузились</p>"}
             </div>
             <p class="hint">Если ничего не выбрать — будут взяты все корневые события</p>
         </div>
