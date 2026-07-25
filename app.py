@@ -299,6 +299,75 @@ def get_card_full(cid):
         "properties": props
     }
 
+def build_id_to_title(project):
+    """Один раз собираем id → title по всем таблицам проекта."""
+    id_to_title = {}
+    for table_key, table_id in project["tables"].items():
+        try:
+            data = api("/api/v1/ql/content-database/content", {
+                "query": {
+                    "__filter": {"contentDatabaseId": table_id},
+                    "content": {"article": {"id": True, "title": True}, "hasNested": True}
+                }
+            })
+            for item in data.get("content", []):
+                art = item.get("article", {})
+                cid = art.get("id")
+                title = art.get("title") or ""
+                if cid:
+                    id_to_title[cid] = title
+        except Exception as e:
+            print(f"[slice] Не удалось загрузить таблицу {table_key} для словаря: {e}")
+    print(f"[slice] Словарь id→title: {len(id_to_title)} записей")
+    return id_to_title
+
+def resolve_relation(val, id_to_title):
+    """Превращает relation (list of {id:..}) в строку имён."""
+    if not isinstance(val, list):
+        return None
+    names = []
+    for item in val:
+        if isinstance(item, dict) and "id" in item:
+            cid = item["id"]
+            names.append(id_to_title.get(cid, f"[не найдено: {cid}]"))
+        elif isinstance(item, str):
+            names.append(item)
+    return ", ".join(names) if names else None
+
+def format_card(card, id_to_title):
+    """Формирует блок карточки с резолвнутыми связями."""
+    lines = [f"### {card['title']}"]
+    props = card.get("properties") or {}
+    
+    # Собираем интересные поля
+    meta = []
+    relations = []
+    
+    for k, v in props.items():
+        k_lower = str(k).lower()
+        # Простые значения (статус, флаги, числа)
+        if not isinstance(v, (list, dict)):
+            if v is not None and str(v).strip():
+                meta.append(f"{k}: {v}")
+            continue
+        # Relation
+        resolved = resolve_relation(v, id_to_title)
+        if resolved is not None:
+            relations.append(f"{k}: {resolved}")
+    
+    if meta:
+        lines.append(" | ".join(meta[:6]))  # не раздуваем
+    for r in relations:
+        lines.append(r)
+    
+    body = card.get("body") or ""
+    if body:
+        lines.append("")
+        lines.append(body)
+    lines.append("")
+    return "\n".join(lines) + "\n"
+
+
 def get_all_events(table_id):
     """Получаем все события + пытаемся вытащить родителя"""
     data = api("/api/v1/ql/content-database/content", {
@@ -483,6 +552,9 @@ def slice():
     project = PROJECTS[project_key]
     events_table_id = project["tables"]["events"]
 
+    # Словарь id → title для резолва связей
+    id_to_title = build_id_to_title(project)
+
     # Загружаем все события и строим дерево
     all_events = get_all_events(events_table_id)
     by_id, children, roots = build_tree(all_events)
@@ -538,7 +610,7 @@ def slice():
                 break
             try:
                 card = get_card_full(eid)
-                block = f"### {card['title']}\n{card['body']}\n\n"
+                block = format_card(card, id_to_title)
                 if current_len + len(block) > limit:
                     result.append("\n--- Обрезано по лимиту ---\n")
                     break
@@ -568,7 +640,7 @@ def slice():
                 break
             try:
                 card = get_card_full(row["id"])
-                block = f"### {card['title']}\n{card['body']}\n\n"
+                block = format_card(card, id_to_title)
                 if current_len + len(block) > limit:
                     break
                 result.append(block)
