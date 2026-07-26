@@ -450,3 +450,125 @@ def resume_missing_relations(api_func) -> dict:
 
     journal.log("done", True, "недостающие связи досозданы")
     return journal.summary()
+
+
+def get_view_id(api_func, table_id: str) -> str | None:
+    """
+    POST /api/v1/wiki/views
+    Возвращает id первого (основного) представления таблицы.
+    """
+    try:
+        result = api_func("/api/v1/wiki/views", {
+            "sourceId": table_id,
+            "sourceType": "space",
+        })
+        # Возможные формы ответа
+        if isinstance(result, list) and result:
+            return result[0].get("id") or result[0].get("viewId")
+        if isinstance(result, dict):
+            items = result.get("items") or result.get("data") or result.get("views") or []
+            if items:
+                return items[0].get("id") or items[0].get("viewId")
+            return result.get("id") or result.get("viewId")
+        return None
+    except Exception as e:
+        print(f"[get_view_id] {table_id}: {e}")
+        return None
+
+
+def show_columns(
+    api_func,
+    table_id: str,
+    view_id: str,
+    codes: list[str],
+    journal: ProvisionJournal,
+    schema_key: str,
+) -> bool:
+    """
+    Делает перечисленные property codes видимыми в представлении.
+    """
+    # title всегда первый
+    fields = ["title"] + [c for c in codes if c and c != "title"]
+    payload = {
+        "code": "group",
+        "payload": {
+            "commands": [
+                {
+                    "code": "display_view_update",
+                    "payload": {
+                        "entity": {
+                            "spaceId": table_id,
+                            "viewId": view_id,
+                        },
+                        "settingsOperations": [
+                            {
+                                "path": "__displayProperties",
+                                "method": "update",
+                                "code": "fields",
+                                "value": fields,
+                            },
+                            {
+                                "path": "__layout",
+                                "method": "update",
+                                "code": "propertySort",
+                                "value": fields + ["author"],
+                            },
+                        ],
+                    },
+                    "internal": False,
+                }
+            ]
+        },
+    }
+    try:
+        api_func("/api/v1/wiki/properties/command/execute", payload)
+        journal.log("show_columns", True, f"{schema_key}: {len(fields)} колонок")
+        time.sleep(REQUEST_DELAY)
+        return True
+    except Exception as e:
+        journal.log("show_columns", False, f"{schema_key}: {e}")
+        time.sleep(REQUEST_DELAY)
+        return False
+
+
+# Коды свойств из успешных прогонов (обычные + связи)
+KNOWN_CODES: dict[str, list[str]] = {
+    "world": ["a6df", "9f57", "c25d"],
+    "locations": ["931b", "ce47", "aa15", "eabc", "310a", "6907"],
+    "characters": ["e0a5", "f56d", "b36f", "d65e", "232e", "0ec3", "a725", "13db", "652d", "aa6c", "19cd"],
+    "organizations": ["3ae1", "c0bc", "b039", "f469", "46fe", "86d3", "797d", "6f21", "179e", "b03b", "3926"],
+    "artifacts": ["c98c", "02da", "2f5c", "cccf", "b390", "63cb", "aa7f", "9e2a", "d0a0", "6e4d"],
+    "lines": ["c8e9", "6791", "9cc6", "15f3", "d8dc", "5714"],
+    "events": ["0fd0", "572b", "c376", "de4c", "a8e4", "8e07", "61ce", "95be", "98bc", "d432", "661c", "f8c1"],
+    "chapters": ["b37e", "114c", "618a", "648e", "a688", "11ad", "ebd2", "d828", "a10b", "924b", "ac67"],
+    "hooks": ["d879", "c318", "5278", "3ee7", "19b5", "46f7", "d5a6", "cf8d", "7369", "2a19", "a246"],
+    "secrets": ["ffea", "fdef", "2e03", "d266", "6fb7", "a0d4", "63ea", "7c9c", "d424", "7cfc"],
+    "references": ["6117", "8cbd", "ab73", "fc11", "7d94", "542a", "bb62", "0fcc"],
+    "archive": ["6a40", "253a", "b0d5"],
+}
+
+
+def show_all_columns(api_func) -> dict:
+    """
+    Для каждой таблицы: получает viewId и делает все известные колонки видимыми.
+    """
+    journal = ProvisionJournal()
+    journal.table_ids = dict(KNOWN_TABLES)
+    journal.created_space_id = "846990cf-487f-4650-9cf1-f396492d2e17"
+
+    for key, table_id in KNOWN_TABLES.items():
+        codes = KNOWN_CODES.get(key, [])
+        if not codes:
+            journal.log("show_columns", False, f"{key}: нет известных кодов")
+            continue
+
+        view_id = get_view_id(api_func, table_id)
+        if not view_id:
+            journal.log("show_columns", False, f"{key}: не удалось получить viewId")
+            continue
+
+        journal.log("get_view_id", True, f"{key} → {view_id}")
+        show_columns(api_func, table_id, view_id, codes, journal, key)
+
+    journal.log("done", True, "колонки сделаны видимыми")
+    return journal.summary()

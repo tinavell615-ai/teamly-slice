@@ -1679,10 +1679,11 @@ start_proactive_refresh()
 
 # ===================== PROVISION v7 (T3) =====================
 try:
-    from provision_v7 import provision_space, resume_missing_relations
+    from provision_v7 import provision_space, resume_missing_relations, show_all_columns
 except ImportError:
     provision_space = None
     resume_missing_relations = None
+    show_all_columns = None
 
 # Из успешного создания таблицы внутри пространства, созданного через API (26.07)
 KNOWN_SPACE_ID = "846990cf-487f-4650-9cf1-f396492d2e17"
@@ -1701,8 +1702,9 @@ def provision_endpoint():
         return """
         <h2>Провижининг v7</h2>
         <ul>
-          <li><a href="/provision?mode=relations&confirm=1"><b>Досоздать недостающие связи</b></a> (characters, organizations, locations)</li>
-          <li><a href="/provision?confirm=1">Полный повторный провижининг</a> (не рекомендуется — создаст дубли)</li>
+          <li><a href="/provision?mode=columns&confirm=1"><b>Показать все колонки</b></a> (сделать видимыми во всех таблицах)</li>
+          <li><a href="/provision?mode=relations&confirm=1">Досоздать недостающие связи</a></li>
+          <li><a href="/provision?confirm=1">Полный повторный провижининг</a> (не рекомендуется)</li>
         </ul>
         <p><a href="/">← Назад</a></p>
         """, 200, {"Content-Type": "text/html; charset=utf-8"}
@@ -1715,6 +1717,10 @@ def provision_endpoint():
             if resume_missing_relations is None:
                 return jsonify({"error": "resume_missing_relations не найден"}), 500
             result = resume_missing_relations(api)
+        elif mode == "columns":
+            if show_all_columns is None:
+                return jsonify({"error": "show_all_columns не найден"}), 500
+            result = show_all_columns(api)
         else:
             result = provision_space(
                 api,
