@@ -5,10 +5,14 @@
 
 import uuid
 import json
+import time
 from datetime import datetime
 from typing import Any
 
 from schema_v7 import SCHEMA, CREATION_ORDER, SOURCE_OPTIONS
+
+# Пауза между запросами, чтобы не ловить 429
+REQUEST_DELAY = 0.55
 
 # Эти функции должны быть переданы из app (api, get_token и т.д.)
 # или импортированы, если модуль в том же процессе.
@@ -138,9 +142,11 @@ def create_table(
         journal.table_ids[schema_key] = table_id
         journal.property_codes[schema_key] = {}
         journal.log("create_table", True, f"{schema_key} → {table_id}", {"title": title})
+        time.sleep(REQUEST_DELAY)
         return table_id
     except Exception as e:
         journal.log("create_table", False, f"{schema_key}: {e}")
+        time.sleep(REQUEST_DELAY)
         return None
 
 
@@ -192,9 +198,11 @@ def create_property(
             True,
             f"{schema_key}.{prop['name']} code={code} type={prop['type']}",
         )
+        time.sleep(REQUEST_DELAY)
         return code
     except Exception as e:
         journal.log("create_property", False, f"{schema_key}.{prop['name']}: {e}")
+        time.sleep(REQUEST_DELAY)
         return None
 
 
@@ -250,9 +258,11 @@ def create_relation(
             True,
             f"{schema_key}.{rel['name']} → {rel['target']} code={code}",
         )
+        time.sleep(REQUEST_DELAY)
         return code
     except Exception as e:
         journal.log("create_relation", False, f"{schema_key}.{rel['name']}: {e}")
+        time.sleep(REQUEST_DELAY)
         return None
 
 
@@ -374,9 +384,69 @@ def provision_space(
 
 
 # ---------------------------------------------------------------------------
-# Пример использования из app (после импорта):
-#
-# from provision_v7 import provision_space
-# result = provision_space(api, "Тест-v7-провижининг", container_id="6aea92ec-...")
-# print(json.dumps(result, ensure_ascii=False, indent=2))
+# Известные ID из успешного провижининга 26.07.2026
 # ---------------------------------------------------------------------------
+
+KNOWN_TABLES = {
+    "world": "d024b1b2-f999-437b-affd-0fc259233fa3",
+    "locations": "d9ab271c-f7be-43a2-a158-d74ae959e279",
+    "characters": "f32e41c6-384b-4af1-8d54-cb5329a57c22",
+    "organizations": "d0db18e6-35d9-4b52-bfaa-152e4baeb93a",
+    "artifacts": "9259fcdc-288f-4924-b300-22ad61c7117c",
+    "lines": "ff412fe6-2a64-4588-bcf9-341a2ab1cdcc",
+    "events": "8ea0fdf1-2bec-4775-a571-d90f88ae8361",
+    "chapters": "616b179d-22be-4aa1-acdc-ae06b6743c68",
+    "hooks": "4d7e944d-19ca-4b01-90b7-2f2d2ff76fea",
+    "secrets": "9e9faf75-82e3-429e-8be6-5f07f2173614",
+    "references": "fda2d470-9b68-40b8-88dd-5102db9d836a",
+    "archive": "d0384707-f300-41ba-b4ea-a515a1b55394",
+}
+
+# Связи, которые упали с 429 при первом прогоне
+MISSING_RELATIONS = [
+    ("locations", "Контролирующая организация"),
+    ("characters", "Связанные персонажи"),
+    ("characters", "Организации"),
+    ("characters", "Артефакты"),
+    ("characters", "Ключевые события"),
+    ("characters", "Ключевые локации"),
+    ("characters", "Линии"),
+    ("organizations", "Родительская организация"),
+    ("organizations", "Руководство"),
+    ("organizations", "Члены"),
+    ("organizations", "Базовые локации"),
+    ("organizations", "Противники"),
+    ("organizations", "Артефакты"),
+]
+
+
+def resume_missing_relations(api_func) -> dict:
+    """
+    Досоздаёт только те связи, которые упали с 429.
+    """
+    journal = ProvisionJournal()
+    journal.table_ids = dict(KNOWN_TABLES)
+    journal.created_space_id = "846990cf-487f-4650-9cf1-f396492d2e17"
+
+    for schema_key, rel_name in MISSING_RELATIONS:
+        tbl = SCHEMA.get(schema_key)
+        if not tbl:
+            continue
+        table_id = KNOWN_TABLES.get(schema_key)
+        if not table_id:
+            continue
+
+        rel = next((r for r in tbl.get("relations", []) if r["name"] == rel_name), None)
+        if not rel:
+            journal.log("create_relation", False, f"{schema_key}.{rel_name}: нет в схеме")
+            continue
+
+        target_id = KNOWN_TABLES.get(rel["target"])
+        if not target_id:
+            journal.log("create_relation", False, f"{schema_key}.{rel_name}: нет target {rel['target']}")
+            continue
+
+        create_relation(api_func, table_id, rel, target_id, journal, schema_key)
+
+    journal.log("done", True, "недостающие связи досозданы")
+    return journal.summary()

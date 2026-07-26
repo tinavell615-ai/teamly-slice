@@ -1679,9 +1679,10 @@ start_proactive_refresh()
 
 # ===================== PROVISION v7 (T3) =====================
 try:
-    from provision_v7 import provision_space
+    from provision_v7 import provision_space, resume_missing_relations
 except ImportError:
     provision_space = None
+    resume_missing_relations = None
 
 # Из успешного создания таблицы внутри пространства, созданного через API (26.07)
 KNOWN_SPACE_ID = "846990cf-487f-4650-9cf1-f396492d2e17"
@@ -1690,16 +1691,19 @@ KNOWN_PARENT_ID = "b35e2c9c-ea8e-493c-a8ed-ac3c9b87c45a"
 @app.route("/provision", methods=["GET"])
 def provision_endpoint():
     """
-    Тестовый провижининг таблиц в уже созданном пространстве v7.
-    Требует ?confirm=1
+    ?confirm=1          — полный провижининг (таблицы+колонки+связи)
+    ?mode=relations&confirm=1 — только недостающие связи (после 429)
     """
-    if request.args.get("confirm") != "1":
+    mode = request.args.get("mode", "full")
+    confirm = request.args.get("confirm") == "1"
+
+    if not confirm:
         return """
         <h2>Провижининг v7</h2>
-        <p>Создаст все 12 таблиц + колонки + связи <b>внутри уже существующего</b> пространства<br>
-        <code>846990cf-487f-4650-9cf1-f396492d2e17</code></p>
-        <p>Для запуска добавь <code>?confirm=1</code> к URL.</p>
-        <p><a href="/provision?confirm=1">Запустить провижининг таблиц</a></p>
+        <ul>
+          <li><a href="/provision?mode=relations&confirm=1"><b>Досоздать недостающие связи</b></a> (characters, organizations, locations)</li>
+          <li><a href="/provision?confirm=1">Полный повторный провижининг</a> (не рекомендуется — создаст дубли)</li>
+        </ul>
         <p><a href="/">← Назад</a></p>
         """, 200, {"Content-Type": "text/html; charset=utf-8"}
 
@@ -1707,12 +1711,17 @@ def provision_endpoint():
         return jsonify({"error": "provision_v7.py не найден"}), 500
 
     try:
-        result = provision_space(
-            api,
-            title="(reuse)",
-            parent_id=KNOWN_PARENT_ID,
-            existing_space_id=KNOWN_SPACE_ID,
-        )
+        if mode == "relations":
+            if resume_missing_relations is None:
+                return jsonify({"error": "resume_missing_relations не найден"}), 500
+            result = resume_missing_relations(api)
+        else:
+            result = provision_space(
+                api,
+                title="(reuse)",
+                parent_id=KNOWN_PARENT_ID,
+                existing_space_id=KNOWN_SPACE_ID,
+            )
         return jsonify(result), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
