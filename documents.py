@@ -107,6 +107,10 @@ def _chapters_key(project: str, doc_id: str) -> str:
     return f"docs:{project}:{doc_id}:chapters"
 
 
+def _chunks_key(project: str, doc_id: str) -> str:
+    return f"docs:{project}:{doc_id}:chunks"
+
+
 # ---------- Parse ----------
 
 def extract_text_txt(raw: bytes) -> str:
@@ -373,3 +377,130 @@ def delete_document(project: str, doc_id: str) -> bool:
             except Exception:
                 pass
     return True
+
+
+# ---------- B. Нарезка на куски ----------
+# Цель: ~12–20 стр. на кусок. Крупные главы режем с перекрытием ~2 стр.
+# Мелкие (< 4 стр.) при желании склеиваем с соседней — пока только split.
+
+TARGET_CHARS = 18 * CHARS_PER_PAGE   # ~18 стр.
+MAX_CHARS = 25 * CHARS_PER_PAGE      # выше — режем
+OVERLAP_CHARS = 2 * CHARS_PER_PAGE   # ~2 стр. перекрытия
+MIN_CHARS = 4 * CHARS_PER_PAGE       # мельче — кандидат на склейку
+
+
+def _split_text_by_paragraphs(text: str, max_chars: int, overlap_chars: int) -> list[str]:
+    """Режет текст по границам абзацев, с перекрытием хвоста предыдущего куска."""
+    if len(text) <= max_chars:
+        return [text]
+
+    paras = text.split("\n")
+    chunks: list[str] = []
+    buf: list[str] = []
+    buf_len = 0
+
+    def flush(with_overlap_from: str | None = None):
+        nonlocal buf, buf_len
+        body = "\n".join(buf).strip()
+        if not body:
+            buf, buf_len = [], 0
+            return
+        chunks.append(body)
+        # подготовка overlap для следующего
+        if overlap_chars > 0 and len(body) > overlap_chars:
+            tail = body[-overlap_chars:]
+            # выровнять по началу абзаца в хвосте
+            nl = tail.find("\n")
+            if nl != -1:
+                tail = tail[nl + 1:]
+            buf = [tail] if tail.strip() else []
+            buf_len = len(tail)
+        else:
+            buf, buf_len = [], 0
+
+    for para in paras:
+        plen = len(para) + 1
+        if buf_len + plen > max_chars and buf:
+            flush()
+        buf.append(para)
+        buf_len += plen
+    if buf:
+        body = "\n".join(buf).strip()
+        if body:
+            chunks.append(body)
+    return chunks or [text]
+
+
+def build_chunks(project: str, doc_id: str) -> dict:
+    """
+    Строит куски по главам документа.
+    id куска устойчивый: {doc_id}:c{chapter_index}:p{part}
+    """
+    chapters = redis_get(_chapters_key(project, doc_id))
+    if not chapters:
+        return {"ok": False, "error": "нет глав — документ не найден или не разобран"}
+
+    chunks: list[dict] = []
+    for ch in chapters:
+        ch_idx = ch.get("index")
+        title = ch.get("title") or f"Глава {ch_idx}"
+        text = ch.get("text") or ""
+        chars = len(text)
+
+        if chars <= MAX_CHARS:
+            parts = [text]
+        else:
+            parts = _split_text_by_paragraphs(text, TARGET_CHARS, OVERLAP_CHARS)
+
+        for part_i, part_text in enumerate(parts, start=1):
+            chunk_id = f"{doc_id}:c{ch_idx}:p{part_i}"
+            chunks.append({
+                "id": chunk_id,
+                "doc_id": doc_id,
+                "chapter_index": ch_idx,
+                "chapter_title": title,
+                "part": part_i,
+                "parts_total": len(parts),
+                "chars": len(part_text),
+                "pages_est": max(1, round(len(part_text) / CHARS_PER_PAGE)),
+                "tokens_est": max(1, round(len(part_text) / CHARS_PER_TOKEN)),
+                "text": part_text,
+                "status": "pending",  # pending | done | error | skipped
+            })
+
+    # мета без текста для списка
+    meta_list = [{k: v for k, v in c.items() if k != "text"} for c in chunks]
+    redis_set(_chunks_key(project, doc_id), chunks)
+
+    # обновить meta документа
+    doc_meta = redis_get(_meta_key(project, doc_id)) or {}
+    doc_meta["chunks_count"] = len(chunks)
+    doc_meta["chunks_built_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    redis_set(_meta_key(project, doc_id), doc_meta)
+
+    return {
+        "ok": True,
+        "doc_id": doc_id,
+        "chunks_count": len(chunks),
+        "chunks": meta_list,
+        "params": {
+            "target_pages": TARGET_CHARS // CHARS_PER_PAGE,
+            "max_pages": MAX_CHARS // CHARS_PER_PAGE,
+            "overlap_pages": OVERLAP_CHARS // CHARS_PER_PAGE,
+        },
+    }
+
+
+def list_chunks(project: str, doc_id: str, include_text: bool = False) -> list[dict]:
+    chunks = redis_get(_chunks_key(project, doc_id)) or []
+    if include_text:
+        return chunks
+    return [{k: v for k, v in c.items() if k != "text"} for c in chunks]
+
+
+def get_chunk(project: str, doc_id: str, chunk_id: str) -> dict | None:
+    chunks = redis_get(_chunks_key(project, doc_id)) or []
+    for c in chunks:
+        if c.get("id") == chunk_id:
+            return c
+    return None

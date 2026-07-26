@@ -1789,10 +1789,27 @@ async function loadList(){{
       <div class="meta">${{d.format}} · ~${{d.pages_est}} стр. · ~${{d.tokens_est}} tok · глав: ${{d.chapters_count}} · ${{d.created_at}}</div>
       <div class="meta">id: ${{d.id}}</div>
       <button onclick="showChapters('${{d.id}}')">Главы</button>
+      <button onclick="buildChunks('${{d.id}}')">Куски</button>
       <button onclick="delDoc('${{d.id}}')">Удалить</button>
       <div id="ch-${{d.id}}"></div>
     </div>`).join('');
 }}
+
+async function buildChunks(id){{
+  const box = document.getElementById('ch-' + id);
+  box.innerHTML = '<p class="meta">Нарезка…</p>';
+  const r = await fetch('/api/documents/' + id + '/chunks/build?project=' + encodeURIComponent(project), {{method:'POST'}});
+  const data = await r.json();
+  if (!data.ok) {{ box.textContent = data.error || 'ошибка'; return; }}
+  const params = data.params || {{}};
+  box.innerHTML = '<p class="meta">кусков: ' + data.chunks_count +
+    ' (цель ~' + (params.target_pages||'?') + ' стр., max ' + (params.max_pages||'?') +
+    ', overlap ' + (params.overlap_pages||'?') + ')</p><ul class="chapters">' +
+    (data.chunks||[]).map(c =>
+      `<li>${{c.id}} · ${{c.chapter_title}} ч.${{c.part}}/${{c.parts_total}} — ${{c.pages_est}} стр. (${{c.chars}} зн.)</li>`
+    ).join('') + '</ul>';
+}}
+
 async function showChapters(id){{
   const r = await fetch('/api/documents/' + id + '?project=' + encodeURIComponent(project));
   const d = await r.json();
@@ -1892,6 +1909,46 @@ def api_document_chapter(doc_id, chapter_index):
         return jsonify({"error": "documents module missing"}), 500
     project = request.args.get("project", "detective_v7")
     ch = get_chapter(project, doc_id, chapter_index)
+    if not ch:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(ch)
+
+
+
+@app.route("/api/documents/<doc_id>/chunks", methods=["GET"])
+def api_document_chunks(doc_id):
+    try:
+        from documents import list_chunks, build_chunks
+    except ImportError:
+        return jsonify({"error": "documents module missing"}), 500
+    project = request.args.get("project", "detective_v7")
+    rebuild = request.args.get("rebuild") == "1"
+    if rebuild:
+        result = build_chunks(project, doc_id)
+        return jsonify(result), (200 if result.get("ok") else 400)
+    chunks = list_chunks(project, doc_id)
+    return jsonify({"doc_id": doc_id, "chunks_count": len(chunks), "chunks": chunks})
+
+
+@app.route("/api/documents/<doc_id>/chunks/build", methods=["POST"])
+def api_document_chunks_build(doc_id):
+    try:
+        from documents import build_chunks
+    except ImportError:
+        return jsonify({"error": "documents module missing"}), 500
+    project = request.args.get("project") or (request.json or {}).get("project") or "detective_v7"
+    result = build_chunks(project, doc_id)
+    return jsonify(result), (200 if result.get("ok") else 400)
+
+
+@app.route("/api/documents/<doc_id>/chunks/<path:chunk_id>", methods=["GET"])
+def api_document_chunk_one(doc_id, chunk_id):
+    try:
+        from documents import get_chunk
+    except ImportError:
+        return jsonify({"error": "documents module missing"}), 500
+    project = request.args.get("project", "detective_v7")
+    ch = get_chunk(project, doc_id, chunk_id)
     if not ch:
         return jsonify({"error": "not found"}), 404
     return jsonify(ch)
