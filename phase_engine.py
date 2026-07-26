@@ -228,8 +228,7 @@ def run_phase_all_chunks(
 import threading
 import uuid
 
-_jobs_lock = threading.Lock()
-_jobs: dict[str, dict] = {}
+# _jobs / _jobs_lock удалены (слой 1)
 
 
 def _job_key(job_id: str) -> str:

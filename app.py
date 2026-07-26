@@ -59,7 +59,8 @@ PROJECTS = {
 }
 
 # ===================== SCHEMA CODES (Слой 1) =====================
-from registry import normalize as reg_normalize, table_key as reg_table_key, DISPLAY as REG_DISPLAY, is_relation as reg_is_relation
+from registry import normalize as reg_normalize, table_key as reg_table_key, DISPLAY as REG_DISPLAY, is_relation as reg_is_relation, relation_target as reg_relation_target, EMOJI as REG_EMOJI
+from rules import RULES
 from names import names_compatible
 
 CODES: dict[str, dict] = {}  # project_key → {tkey → {prop_name → {code, type, options}}}
@@ -136,46 +137,7 @@ def resolve_select_value(project_key: str, tkey: str, prop_name: str, text_value
 
 
 
-# Маппинг внутренних ID свойств Teamly → читаемые названия
-# Зафиксировано по реальному срезу 25.07.2026. Стабильно, как ID таблиц.
-PROPERTY_LABELS = {
-    # События
-    "Ik4p": "Участники",
-    "K3b5": "Участники",
-    "Vfxy": "Локация",
-    "nNmi": "Локация",
-    "4LZq": "ID",
-    "B4zM": "Хронопорядок",
-    "K714": "Эпоха/Слой",
-    "lcVz": "Статус",
-    "uHqz": "Узловой",
-    # Персонажи
-    "QWXk": "Связи",
-    "Y7ne": "Связи",
-    "eXYm": "События",
-    "yB3V": "События",
-    "vLi4": "Локации",
-    "x919": "Локации",
-    "VX3t": "Артефакты/Силы",
-    "8LHF": "ID",
-    "LC5w": "Год/Возраст",
-    "MNDf": "Статус",
-    "Mtec": "Слой",
-    "pAOs": "Тип",
-    # Локации
-    "747P": "Связанные персонажи",
-    "8iC3": "Связанные события",
-    "ZOKQ": "Связанные персонажи",
-    "xe2X": "Связанные события",
-    "hVwM": "Дочерние локации",
-    "y5Br": "Родительская локация",
-    "0sAM": "Арки/Главы",
-    "i8cY": "Связанные сущности",
-    "2chV": "Тип",
-    "NcYD": "Слой",
-    "ghta": "Родитель",
-    "re5V": "Статус",
-}
+# PROPERTY_LABELS удалён (слой 1). Коды читаются из schema:codes.
 
 VOLUME_LIMITS = {
     "compact": 45000,
@@ -186,28 +148,28 @@ VOLUME_LIMITS = {
 # ===================== NAME RESOLVER (Task C) =====================
 import re
 import uuid
+# reg_normalize берётся из registry (импорт выше)
 
-# Эмодзи-префиксы, которые нужно игнорировать при сопоставлении
-EMOJI_PREFIX_RE = re.compile(
-    r'^[\U0001F300-\U0001F9FF\U00002600-\U000027BF\U0001F600-\U0001F64F'
-    r'\U0001F680-\U0001F6FF\U0001F1E0-\U0001F1FF\U00002702-\U000027B0'
-    r'\U000024C2-\U0001F251\U0001F900-\U0001F9FF\U0001FA00-\U0001FA6F'
-    r'\U0001FA70-\U0001FAFF\U00002600-\U000026FF\s]*'
-)
+_TITLE_CACHE: dict[str, tuple[float, dict]] = {}  # project_key → (ts, data)
+_TITLE_CACHE_TTL = 120
 
-def normalize_title(title: str) -> str:
-    """Убирает эмодзи-префиксы, лишние пробелы, приводит к нижнему регистру."""
-    if not title:
-        return ""
-    t = EMOJI_PREFIX_RE.sub("", title)
-    t = re.sub(r'\s+', ' ', t).strip().lower()
-    return t
+def invalidate_title_cache(project_key: str | None = None):
+    if project_key:
+        _TITLE_CACHE.pop(project_key, None)
+    else:
+        _TITLE_CACHE.clear()
 
-def build_title_to_ids(project_key: str = "burevestnik") -> dict:
+def build_title_to_ids(project_key: str = "burevestnik", force: bool = False) -> dict:
+
     """
     Строит словарь: table_key → {normalized_title → [id, ...]}
-    Один title может иметь несколько id (дубли) — тогда вопрос автору.
+    Кэш 120 сек, инвалидация после записи.
     """
+    now = time.time()
+    if not force and project_key in _TITLE_CACHE:
+        ts, data = _TITLE_CACHE[project_key]
+        if now - ts < _TITLE_CACHE_TTL:
+            return data
     project = PROJECTS.get(project_key)
     if not project:
         return {}
@@ -229,7 +191,7 @@ def build_title_to_ids(project_key: str = "burevestnik") -> dict:
                 title = art.get("title") or ""
                 if not cid:
                     continue
-                norm = normalize_title(title)
+                norm = reg_normalize(title)
                 if not norm:
                     continue
                 # общий
@@ -239,10 +201,12 @@ def build_title_to_ids(project_key: str = "burevestnik") -> dict:
         except Exception as e:
             print(f"[resolver] Ошибка загрузки {table_key}: {e}")
     
-    return {
+    result = {
         "global": title_to_ids,
         "per_table": per_table
     }
+    _TITLE_CACHE[project_key] = (time.time(), result)
+    return result
 
 def resolve_name(name: str, table_key: str, resolver_data: dict) -> dict:
     """
@@ -256,7 +220,7 @@ def resolve_name(name: str, table_key: str, resolver_data: dict) -> dict:
         "question": "..."      # текст для предпросмотра
     }
     """
-    norm = normalize_title(name)
+    norm = reg_normalize(name)
     if not norm:
         return {"status": "not_found", "question": "Пустое название после нормализации"}
     
@@ -300,27 +264,7 @@ def make_idempotent(action: str, name: str, table_key: str, resolver_data: dict)
 
 # ===================== DELTA PARSER + PREVIEW (Task D) =====================
 
-TABLE_ALIASES = {
-    "мир": "world",
-    "локации": "locations",
-    "персонажи": "characters",
-    "крючки": "hooks",
-    "секреты": "secrets",
-    "события": "events",
-    "главы": "chapters",
-    "архив": "archive",
-}
-
-TABLE_DISPLAY = {
-    "world": "Мир",
-    "locations": "Локации",
-    "characters": "Персонажи",
-    "hooks": "Крючки",
-    "secrets": "Секреты",
-    "events": "События",
-    "chapters": "Главы",
-    "archive": "Архив",
-}
+# TABLE_ALIASES / TABLE_DISPLAY удалены — registry.table_key / DISPLAY
 
 def parse_delta(text: str) -> list:
     """
@@ -368,10 +312,10 @@ def parse_delta(text: str) -> list:
 
             if upper.startswith("ТАБЛИЦА:"):
                 raw = stripped.split(":", 1)[1].strip().lower()
-                key = TABLE_ALIASES.get(raw)
+                key = reg_table_key(raw)
                 if key:
                     action["table_key"] = key
-                    action["table_display"] = TABLE_DISPLAY.get(key, raw)
+                    action["table_display"] = REG_DISPLAY.get(key, raw) if key else raw
                 else:
                     action["table_key"] = raw
                     action["table_display"] = stripped.split(":", 1)[1].strip()
@@ -470,130 +414,34 @@ def build_preview(delta_text: str, project_key: str = "burevestnik") -> dict:
             else:
                 preview["updates"].append(item)
 
-        # ========== ВАЛИДАЦИЯ ПО ПРАВИЛАМ БИБЛИИ (Task E) ==========
-
-        # 1. Крючки и Секреты — только по явному подтверждению
-        if table_key in ("hooks", "secrets") and effective_action == "создать":
-            q = f"⚠ Создание карточки в таблице «{act['table_display']}» требует явного подтверждения автора."
-            if q not in preview["questions"]:
-                preview["questions"].append(q)
-                preview["warnings"].append(q)
-            # блокируем автоматическое применение
-            preview["ok"] = False
-
-        # 2. Правило дубля персонажа (подстрока) удалено — см. names.py + task 6. Открытый карантин «Влад» закрывается единым резолвером.
-
-        # 3. В полях связей — только чистые имена (без скобок и описаний)
-        dirty_rel_props = []
-        for prop_name, prop_val in act["properties"].items():
-            low = prop_name.lower()
-            if low in ("участники", "pov", "локации", "родительское событие",
-                       "родительская локация", "связанные персонажи", "главы"):
-                names = [n.strip() for n in re.split(r'[,;]', prop_val) if n.strip()]
-                for n in names:
-                    if "(" in n or ")" in n or "[" in n or "]" in n:
-                        dirty_rel_props.append(f"«{n}» в поле «{prop_name}»")
-        if dirty_rel_props:
-            q = ("⚠ В полях связей найдены описания в скобках (нарушение правила 2.3). "
-                 "Нужны только чистые имена. Проблемные значения: " + "; ".join(dirty_rel_props[:5]))
-            if q not in preview["questions"]:
-                preview["questions"].append(q)
-                preview["warnings"].append(q)
-
-        # 4. Эмодзи-маркировка обязательна в названиях
-        EMOJI_START = re.compile(r'^[\U0001F300-\U0001F9FF\U00002600-\U000027BF\U0001F600-\U0001F64F'
-                                 r'\U0001F680-\U0001F6FF\U0001F1E0-\U0001F1FF\U00002702-\U000027B0'
-                                 r'\U000024C2-\U0001F251\U0001F900-\U0001F9FF\U0001FA00-\U0001FA6F'
-                                 r'\U0001FA70-\U0001FAFF\U00002600-\U000026FF]')
-        if title and not EMOJI_START.match(title.strip()):
-            # предлагаем префикс по таблице
-            suggested = {
-                "events": "🟧",
-                "characters": "👤",
-                "locations": "📍",
-                "hooks": "⚡",
-                "secrets": "🔒",
-                "chapters": "📖",
-                "world": "🌍",
-            }.get(table_key, "•")
-            q = (f"⚠ В названии «{title}» нет эмодзи-префикса (раздел 9). "
-                 f"Рекомендуется: {suggested} {title}")
-            if q not in preview["questions"]:
-                preview["questions"].append(q)
-                preview["warnings"].append(q)
-
-        # 5. Событие обязано иметь Локацию
-        if table_key == "events":
-            has_loc = False
-            for prop_name in act["properties"]:
-                if prop_name.lower() in ("локации", "локация", "locations", "location"):
-                    if act["properties"][prop_name].strip():
-                        has_loc = True
-                        break
-            if not has_loc:
-                q = f"⚠ Событие «{title}» не имеет локации (правило 2.6). Событие без места — нарушение."
-                if q not in preview["questions"]:
-                    preview["questions"].append(q)
-                    preview["warnings"].append(q)
-
-        # 6. Масштаб события ↔ масштаб локации (грубая проверка по эмодзи)
-        if table_key == "events":
-            event_level = None
-            if title.strip().startswith("🟥"):
-                event_level = "root"
-            elif title.strip().startswith("🟧"):
-                event_level = "mid"
-            elif title.strip().startswith("🟩"):
-                event_level = "leaf"
-            loc_val = None
-            for prop_name, prop_val in act["properties"].items():
-                if prop_name.lower() in ("локации", "локация"):
-                    loc_val = prop_val.strip()
-                    break
-            if event_level == "root" and loc_val and loc_val.startswith("🟩"):
-                q = (f"⚠ Масштаб: корневое событие (🟥) привязано к мелкой локации (🟩 «{loc_val}»). "
-                     "Крупное событие обычно происходит в крупной локации.")
-                if q not in preview["questions"]:
-                    preview["questions"].append(q)
-                    preview["warnings"].append(q)
-
-        # 7. Описательный текст не должен попадать в свойства (>200 символов)
-        for prop_name, prop_val in act["properties"].items():
-            if len(str(prop_val)) > 200:
-                q = (f"⚠ Свойство «{prop_name}» слишком длинное ({len(str(prop_val))} символов). "
-                     "Длинный текст должен быть в ТЕЛЕ, а не в свойствах (правило 2.0).")
-                if q not in preview["questions"]:
-                    preview["questions"].append(q)
-                    preview["warnings"].append(q)
+        # ========== ВАЛИДАЦИЯ ПО ПРАВИЛАМ БИБЛИИ (rules.py) ==========
+        ctx = {"resolver": resolver_data, "project_key": project_key}
+        for rule_fn in RULES:
+            for note in rule_fn(act, ctx):
+                text_note = note.get("text") or ""
+                if text_note and text_note not in preview["questions"]:
+                    preview["questions"].append(text_note)
+                    preview["warnings"].append(text_note)
+                if note.get("level") == "block":
+                    preview["ok"] = False
 
         # ========== РЕЗОЛВ СВЯЗЕЙ (после валидации) ==========
         for prop_name, prop_val in act["properties"].items():
-            low = prop_name.lower()
-            if low in ("участники", "pov", "локации", "родительское событие",
-                       "родительская локация", "связанные персонажи", "главы"):
-                names = [n.strip() for n in re.split(r'[,;]', prop_val) if n.strip()]
-                for n in names:
-                    # очищаем от возможного мусора в скобках для резолва
-                    clean_n = re.sub(r'\s*[\(\[\{].*?[\)\]\}]\s*', '', n).strip()
-                    if not clean_n:
-                        continue
-                    if low in ("участники", "pov", "связанные персонажи"):
-                        rel_table = "characters"
-                    elif low in ("локации", "родительская локация"):
-                        rel_table = "locations"
-                    elif low == "родительское событие":
-                        rel_table = "events"
-                    elif low == "главы":
-                        rel_table = "chapters"
-                    else:
-                        rel_table = table_key
-                    r = resolve_name(clean_n, rel_table, resolver_data)
-                    if r["status"] != "ok":
-                        q = r.get("question", f"Проблема с «{n}»")
-                        if q not in preview["questions"]:
-                            preview["questions"].append(q)
-                            preview["warnings"].append(q)
-                            preview["ok"] = False
+            if not reg_is_relation(table_key, prop_name):
+                continue
+            rel_table = reg_relation_target(table_key, prop_name) or table_key
+            names = [n.strip() for n in re.split(r'[,;]', str(prop_val)) if n.strip()]
+            for n in names:
+                clean_n = re.sub(r'\s*[\(\[\{].*?[\)\]\}]\s*', '', n).strip()
+                if not clean_n:
+                    continue
+                r = resolve_name(clean_n, rel_table, resolver_data)
+                if r["status"] != "ok":
+                    q = r.get("question", f"Проблема с «{n}»")
+                    if q not in preview["questions"]:
+                        preview["questions"].append(q)
+                        preview["warnings"].append(q)
+                        preview["ok"] = False
 
     return preview
 
@@ -667,18 +515,25 @@ import logging
 from datetime import datetime as dt
 
 # Простой лог в память + print (в проде можно писать в файл/Upstash)
-WRITE_LOG = []
-
-def _log_write(action: str, title: str, table: str, success: bool, detail: str = ""):
+def _log_write(action: str, title: str, table: str, success: bool, detail: str = "", project_key: str = "burevestnik"):
+    """Кольцевой буфер 500 записей в Redis (переживает передеплой)."""
+    from documents import redis_get, redis_set
     entry = {
-        "ts": dt.now().isoformat(timespec="seconds"),
+        "ts": datetime.utcnow().isoformat() + "Z",
         "action": action,
         "title": title,
         "table": table,
-        "success": success,
-        "detail": detail[:500]
+        "ok": success,
+        "detail": detail,
     }
-    WRITE_LOG.append(entry)
+    key = f"writelog:{project_key}"
+    log = redis_get(key) or []
+    if not isinstance(log, list):
+        log = []
+    log.append(entry)
+    log = log[-500:]
+    redis_set(key, log)
+
     status = "OK" if success else "FAIL"
     print(f"[write] {status} | {table} | {action} | {title} | {detail[:120]}")
 
@@ -965,7 +820,11 @@ def apply_delta(delta_text: str, project_key: str = "burevestnik") -> dict:
                 "error": f"Неожиданная ошибка: {e}"
             })
 
-    report["log"] = list(WRITE_LOG[-50:])  # последние 50 записей
+    from documents import redis_get
+    report["log"] = (redis_get(f"writelog:{project_key}") or [])[-50:]
+    if report.get("applied"):
+        invalidate_title_cache(project_key)
+
     return report
 
 
@@ -1550,29 +1409,52 @@ def resolve_relation(val, id_to_title):
             names.append(item)
     return ", ".join(names) if names else None
 
-def format_card(card, id_to_title):
-    """Формирует блок карточки с резолвнутыми связями, без дублей и с резолвом статусов."""
+def _code_to_label(project_key: str, table_key: str, code: str) -> str:
+    """Обратная карта code → имя. Только внутри одной таблицы."""
+    tmap = (CODES.get(project_key) or {}).get(table_key) or {}
+    for name, meta in tmap.items():
+        c = meta.get("code") if isinstance(meta, dict) else meta
+        if c == code:
+            return name
+    return code
+
+def _option_id_to_text(project_key: str, table_key: str, code: str, opt_id: str) -> str:
+    """option id → текст. Только внутри одной таблицы."""
+    tmap = (CODES.get(project_key) or {}).get(table_key) or {}
+    for name, meta in tmap.items():
+        if not isinstance(meta, dict):
+            continue
+        if meta.get("code") != code:
+            continue
+        for otext, oid in (meta.get("options") or {}).items():
+            if oid == opt_id:
+                return otext
+    return opt_id
+
+def format_card(card, id_to_title, project_key: str, table_key: str):
+    """Формирует блок карточки с резолвнутыми связями и подписями из CODES."""
     lines = [f"### {card['title']}"]
     props = card.get("properties") or {}
     
-    meta = {}          # label → value (последний побеждает)
-    relations = {}     # label → set of names (дедуп)
+    meta = {}
+    relations = {}
     
     for k, v in props.items():
-        label = PROPERTY_LABELS.get(k, k)
-        if label in ("ID",) or k in ("4LZq", "8LHF"):
-            continue
-        
-        # Простые значения или одиночные UUID (статусы, типы и т.п.)
+        label = _code_to_label(project_key, table_key, k)
+        # Простые значения или одиночные UUID
         if not isinstance(v, (list, dict)):
             if v is None or str(v).strip() in ("", "None", "null"):
                 continue
             val = str(v).strip()
-            # Если это UUID — пробуем резолвить как relation
             if len(val) == 36 and val.count("-") == 4:
-                resolved = id_to_title.get(val)
-                if resolved:
-                    val = resolved
+                # сначала option id → текст, потом relation
+                as_opt = _option_id_to_text(project_key, table_key, k, val)
+                if as_opt != val:
+                    val = as_opt
+                else:
+                    resolved = id_to_title.get(val)
+                    if resolved:
+                        val = resolved
             meta[label] = val
             continue
         
@@ -1861,7 +1743,7 @@ def slice():
                 break
             try:
                 card = get_card_full(eid)
-                block = format_card(card, id_to_title)
+                block = format_card(card, id_to_title, project_key, "events")
                 if current_len + len(block) > limit:
                     result.append("\n--- Обрезано по лимиту ---\n")
                     break
@@ -1891,7 +1773,7 @@ def slice():
                 break
             try:
                 card = get_card_full(row["id"])
-                block = format_card(card, id_to_title)
+                block = format_card(card, id_to_title, project_key, table_key)
                 if current_len + len(block) > limit:
                     break
                 result.append(block)
@@ -2490,6 +2372,52 @@ def api_known_reset(doc_id):
     body = request.get_json(silent=True) or {}
     project = request.args.get("project") or body.get("project") or "detective_v7"
     return jsonify(reset_known(project, doc_id))
+
+
+
+@app.route("/selfcheck")
+def selfcheck():
+    """Приёмка 9: схема, коды, PROJECTS vs SCHEMA."""
+    from schema_v7 import SCHEMA
+    from documents import redis_get
+    result = {
+        "schema_tables": len(SCHEMA),
+        "projects": list(PROJECTS.keys()),
+        "codes_loaded": {},
+        "missing_codes": [],
+        "projects_not_in_schema": [],
+        "schema_mismatch": [],
+    }
+    for pk in PROJECTS:
+        codes = CODES.get(pk) or redis_get(f"schema:codes:{pk}") or {}
+        if not isinstance(codes, dict):
+            codes = {}
+        result["codes_loaded"][pk] = {t: len(v) for t, v in codes.items()}
+        proj_tables = set((PROJECTS[pk].get("tables") or {}).keys()) | set(codes.keys())
+        schema_tables = set(SCHEMA.keys())
+        if proj_tables and proj_tables != schema_tables:
+            only_proj = sorted(proj_tables - schema_tables)
+            only_schema = sorted(schema_tables - proj_tables)
+            result["schema_mismatch"].append({
+                "project": pk,
+                "only_in_project": only_proj,
+                "only_in_schema_v7": only_schema,
+                "note": "схема проекта не совпадает с v7 — писать по именам v7 нельзя",
+            })
+        for tkey in SCHEMA:
+            expected = len(SCHEMA[tkey].get("properties", [])) + len(SCHEMA[tkey].get("relations", []))
+            got = len(codes.get(tkey, {}))
+            if got < expected and tkey in proj_tables:
+                result["missing_codes"].append({"project": pk, "table": tkey, "expected": expected, "got": got})
+        for tkey in (PROJECTS[pk].get("tables") or {}):
+            if tkey not in SCHEMA:
+                result["projects_not_in_schema"].append(f"{pk}.{tkey}")
+    result["ok"] = (
+        not result["missing_codes"]
+        and not result["projects_not_in_schema"]
+        and not result["schema_mismatch"]
+    )
+    return jsonify(result)
 
 
 if __name__ == "__main__":
