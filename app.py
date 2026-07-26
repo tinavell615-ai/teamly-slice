@@ -1391,9 +1391,9 @@ def build_project_schema_codes(project_key: str) -> dict:
     """
     Для каждой таблицы проекта: берёт первую карточку, читает schemaProperties,
     собирает карту кодов + options для select.
-    Пустые таблицы — пробует space.schemaProperties, иначе помечает.
+    Пустые таблицы — создаёт техническую строку «[TECH] schema probe»,
+    читает схему, оставляет строку (автор удалит руками).
     Сохраняет в Redis schema:codes, schema:tables, schema:main_article.
-    Возвращает { "codes": {...}, "tables": {...}, "main_article_id": ..., "missing": [...], "raw_samples": [...] }
     """
     from documents import redis_set, redis_get
     project = PROJECTS.get(project_key)
@@ -1406,10 +1406,13 @@ def build_project_schema_codes(project_key: str) -> dict:
     missing = []
     raw_samples = []
     errors = []
+    tech_created = []
 
     for tkey, table_id in tables.items():
-        # найти любую карточку
         article_id = None
+        created_tech = False
+
+        # 1. Попытка найти существующую карточку
         try:
             data = api("/api/v1/ql/content-database/content", {
                 "query": {
@@ -1423,24 +1426,57 @@ def build_project_schema_codes(project_key: str) -> dict:
         except Exception as e:
             errors.append(f"{tkey}: list content failed: {e}")
 
+        # 2. Пустая таблица → создаём техническую строку
         if not article_id:
-            missing.append({"table": tkey, "reason": "empty or no rows"})
-            codes[tkey] = {}
-            continue
+            try:
+                # Создаём минимальную карточку без свойств (чтобы не зависеть от кодов)
+                new_id = str(uuid.uuid4())
+                payload = {
+                    "code": "article_create",
+                    "payload": {
+                        "entity": {
+                            "spaceId": table_id,
+                            "id": new_id,
+                            "title": "[TECH] schema probe",
+                            "properties": []
+                        }
+                    }
+                }
+                api("/api/v1/wiki/properties/command/execute", payload)
+                article_id = new_id
+                created_tech = True
+                tech_created.append({"table": tkey, "id": new_id})
+            except Exception as e:
+                errors.append(f"{tkey}: tech create failed: {e}")
+                missing.append({"table": tkey, "reason": f"empty + tech create failed: {e}"})
+                codes[tkey] = {}
+                continue
 
+        # 3. Читаем схему
         try:
             raw = fetch_article_schema(article_id)
-            raw_samples.append({"table": tkey, "article_id": article_id, "keys": list(raw.keys()) if isinstance(raw, dict) else type(raw).__name__})
-            # schemaProperties может быть на корне или в space
+            raw_samples.append({
+                "table": tkey,
+                "article_id": article_id,
+                "tech": created_tech,
+                "keys": list(raw.keys()) if isinstance(raw, dict) else type(raw).__name__
+            })
             props = raw.get("schemaProperties")
             if not props and isinstance(raw.get("space"), dict):
                 props = raw["space"].get("schemaProperties")
             parsed = _parse_schema_properties(props)
             codes[tkey] = parsed
             if not main_article_id and isinstance(raw.get("space"), dict):
-                main_article_id = raw["space"].get("main_article_id") or raw["space"].get("mainArticleId")
+                main_article_id = (
+                    raw["space"].get("main_article_id")
+                    or raw["space"].get("mainArticleId")
+                )
             if not parsed:
-                missing.append({"table": tkey, "reason": "schemaProperties empty or unparsed", "sample_keys": list((props or {}).keys()) if isinstance(props, dict) else str(type(props))})
+                missing.append({
+                    "table": tkey,
+                    "reason": "schemaProperties empty or unparsed",
+                    "sample_keys": list((props or {}).keys()) if isinstance(props, dict) else str(type(props))
+                })
         except Exception as e:
             errors.append(f"{tkey}: fetch schema failed: {e}")
             codes[tkey] = {}
@@ -1461,6 +1497,7 @@ def build_project_schema_codes(project_key: str) -> dict:
         "missing": missing,
         "errors": errors,
         "raw_samples": raw_samples,
+        "tech_created": tech_created,
         "counts": {k: len(v) for k, v in codes.items()},
     }
 
