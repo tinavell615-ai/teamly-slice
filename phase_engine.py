@@ -26,6 +26,22 @@ def get_known_entities(project: str, doc_id: str) -> dict[str, list[str]]:
     return data if isinstance(data, dict) else {}
 
 
+def _names_compatible(short: str, full: str) -> bool:
+    """«Том» покрывается «Том Реддл»; «Том (бармен)» — нет."""
+    s = short.casefold().strip()
+    f = full.casefold().strip()
+    if s == f:
+        return True
+    # уточнение в скобках = другой человек
+    if "(" in s or "(" in f:
+        return s == f
+    # short — первое слово full
+    f_parts = f.split()
+    if len(f_parts) >= 2 and s == f_parts[0]:
+        return True
+    return False
+
+
 def merge_known_from_delta(known: dict[str, list[str]], delta_items: list[dict]) -> dict[str, list[str]]:
     out = {k: list(v) for k, v in known.items()}
     for item in delta_items or []:
@@ -34,9 +50,24 @@ def merge_known_from_delta(known: dict[str, list[str]], delta_items: list[dict])
         if not table or not title:
             continue
         bucket = out.setdefault(table, [])
-        # нормализация для антидубля
-        titles_norm = {t.casefold().strip() for t in bucket}
-        if title.casefold().strip() not in titles_norm:
+        title_cf = title.casefold().strip()
+
+        # точный дубль
+        if any(b.casefold().strip() == title_cf for b in bucket):
+            continue
+
+        # новое полное имя поглощает короткое («Том Реддл» вместо «Том»)
+        absorbed = False
+        for i, b in enumerate(list(bucket)):
+            if _names_compatible(b, title) and len(title) > len(b):
+                bucket[i] = title
+                absorbed = True
+                break
+            if _names_compatible(title, b) and len(b) >= len(title):
+                # короткое при уже полном — не добавляем
+                absorbed = True
+                break
+        if not absorbed:
             bucket.append(title)
     return out
 
