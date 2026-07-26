@@ -1747,7 +1747,6 @@ def spaces_endpoint():
 def documents_page():
     project = request.args.get("project", "detective_v7")
     proj_js = json.dumps(project)
-    nl = "\n"
     js_parts = [
         "const project = " + proj_js + ";",
         "async function loadList(){",
@@ -1770,6 +1769,7 @@ def documents_page():
         "+'<button type=button data-act=chapters data-id=\"'+d.id+'\">Главы</button> '",
         "+'<button type=button data-act=chunks data-id=\"'+d.id+'\">Куски</button> '",
         "+'<button type=button data-act=prompt data-id=\"'+d.id+'\">Промт ф.1</button> '",
+        "+'<button type=button data-act=run3 data-id=\"'+d.id+'\">Фаза 1 · 3 куска</button> '",
         "+'<button type=button data-act=del data-id=\"'+d.id+'\">Удалить</button>'",
         "+'<div id=ch-'+d.id+'></div></div>';",
         "}).join('');",
@@ -1807,6 +1807,31 @@ def documents_page():
         "+'<pre class=box></pre>';",
         "box.querySelector('pre').textContent='--- SYSTEM ---'+String.fromCharCode(10)+(data.system_preview||'')+String.fromCharCode(10,10)+'--- USER ---'+String.fromCharCode(10)+(data.user_preview||'');",
         "}",
+        "async function runPhase3(id){",
+        "const box=document.getElementById('ch-'+id);",
+        "box.innerHTML='Старт фазы 1 (3 куска)…';",
+        "try{",
+        "const r=await fetch('/api/documents/'+id+'/phase/run?project='+encodeURIComponent(project)+'&phase=1',{",
+        "method:'POST',headers:{'Content-Type':'application/json'},",
+        "body:JSON.stringify({max_chunks:3})});",
+        "const start=await r.json();",
+        "if(!start.job_id){box.textContent=JSON.stringify(start);return;}",
+        "const jid=start.job_id;",
+        "box.innerHTML='job '+jid+' · queued…';",
+        "for(let i=0;i<90;i++){",
+        "await new Promise(function(res){setTimeout(res,10000);});",
+        "const s=await fetch('/api/phase/job/'+jid).then(function(x){return x.json();});",
+        "const job=s.job||{};",
+        "var extra='';",
+        "if(job.result&&job.result.processed)extra=' · processed '+job.result.processed;",
+        "box.innerHTML='job '+jid+' · '+job.status+extra;",
+        "if(job.status==='done'||job.status==='error'){",
+        "box.innerHTML='<pre class=box>'+JSON.stringify(s,null,2)+'</pre>';",
+        "return;}",
+        "}",
+        "box.innerHTML=box.innerHTML+' · timeout опроса';",
+        "}catch(e){box.textContent='err '+e;}",
+        "}",
         "async function delDoc(id){",
         "if(!confirm('Удалить документ?'))return;",
         "await fetch('/api/documents/'+id+'?project='+encodeURIComponent(project),{method:'DELETE'});",
@@ -1817,7 +1842,8 @@ def documents_page():
         "const id=btn.getAttribute('data-id');const act=btn.getAttribute('data-act');",
         "if(act==='chapters')showChapters(id);",
         "else if(act==='chunks')buildChunks(id);",
-        "else if(act==='prompt')showPrompt(id);else if(act==='run1')runPhaseOne(id);",
+        "else if(act==='prompt')showPrompt(id);",
+        "else if(act==='run3')runPhase3(id);",
         "else if(act==='del')delDoc(id);",
         "});",
         "document.getElementById('up').onsubmit=async function(e){",
@@ -1839,7 +1865,7 @@ def documents_page():
         "button{background:#111;color:#fff;border:0;border-radius:8px;padding:0.5rem 1rem;cursor:pointer;margin:0.2rem 0.3rem 0.2rem 0}"
         ".nav a{margin-right:1rem}"
         "ul.chapters{max-height:280px;overflow:auto;font-size:0.9rem}"
-        "pre.box{white-space:pre-wrap;font-size:12px;max-height:320px;overflow:auto;background:#f0f0f0;padding:8px;border-radius:6px}"
+        "pre.box{white-space:pre-wrap;font-size:12px;max-height:420px;overflow:auto;background:#f0f0f0;padding:8px;border-radius:6px}"
         "</style></head><body>"
         "<div class=nav><a href=/>← Главная</a> "
         "<a href=/documents?project=detective_v7>detective_v7</a> "
