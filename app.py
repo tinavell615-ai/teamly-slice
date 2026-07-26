@@ -1790,9 +1790,25 @@ async function loadList(){{
       <div class="meta">id: ${{d.id}}</div>
       <button onclick="showChapters('${{d.id}}')">Главы</button>
       <button onclick="buildChunks('${{d.id}}')">Куски</button>
+      <button onclick="showPrompt('${{d.id}}')">Промт ф.1</button>
       <button onclick="delDoc('${{d.id}}')">Удалить</button>
       <div id="ch-${{d.id}}"></div>
     </div>`).join('');
+}}
+
+
+async function showPrompt(id){{
+  const box = document.getElementById('ch-' + id);
+  box.innerHTML = '<p class="meta">Сборка промта…</p>';
+  const r = await fetch('/api/documents/' + id + '/prompt?project=' + encodeURIComponent(project) + '&phase=1&preview=short');
+  const data = await r.json();
+  if (data.error) {{ box.textContent = data.error; return; }}
+  box.innerHTML = '<p class="meta">фаза ' + data.phase + ': ' + data.phase_name +
+    ' · chunk ' + data.chunk_id +
+    ' · sys ~' + data.meta.system_tokens_est + ' tok, user ~' + data.meta.user_tokens_est + ' tok</p>' +
+    '<pre style="white-space:pre-wrap;font-size:12px;max-height:320px;overflow:auto;background:#f0f0f0;padding:8px;border-radius:6px">' +
+    '--- SYSTEM ---\n' + (data.system_preview||'') + '\n\n--- USER ---\n' + (data.user_preview||'') +
+    '</pre>';
 }}
 
 async function buildChunks(id){{
@@ -1952,6 +1968,53 @@ def api_document_chunk_one(doc_id, chunk_id):
     if not ch:
         return jsonify({"error": "not found"}), 404
     return jsonify(ch)
+
+
+
+@app.route("/api/documents/<doc_id>/prompt", methods=["GET", "POST"])
+def api_document_prompt(doc_id):
+    """Сборка промта (D) без вызова модели. phase + chunk_id обязательны."""
+    try:
+        from documents import get_chunk, list_chunks
+        from prompts import build_messages, PHASES
+    except ImportError as e:
+        return jsonify({"error": str(e)}), 500
+
+    project = request.args.get("project") or (request.json or {}).get("project") or "detective_v7"
+    body = request.json if request.is_json else {}
+    try:
+        phase = int(request.args.get("phase") or body.get("phase") or 1)
+    except (TypeError, ValueError):
+        return jsonify({"error": "phase must be int"}), 400
+    if phase not in PHASES:
+        return jsonify({"error": f"unknown phase {phase}", "known": list(PHASES.keys())}), 400
+
+    chunk_id = request.args.get("chunk_id") or body.get("chunk_id")
+    if not chunk_id:
+        # первый кусок по умолчанию
+        chunks = list_chunks(project, doc_id, include_text=False)
+        if not chunks:
+            return jsonify({"error": "нет кусков — сначала нажмите «Куски»"}), 400
+        chunk_id = chunks[0]["id"]
+
+    chunk = get_chunk(project, doc_id, chunk_id)
+    if not chunk:
+        return jsonify({"error": f"chunk not found: {chunk_id}"}), 404
+
+    known = body.get("known_entities") or {}
+    answers = body.get("author_answers") or []
+    result = build_messages(phase, chunk, known_entities=known, author_answers=answers)
+    # по умолчанию не тащим полный user text в UI если preview=short
+    if request.args.get("preview") == "short":
+        result = {
+            "phase": result["phase"],
+            "phase_name": result["phase_name"],
+            "chunk_id": result["chunk_id"],
+            "meta": result["meta"],
+            "system_preview": result["messages"][0]["content"][:1200] + "…",
+            "user_preview": result["messages"][1]["content"][:800] + "…",
+        }
+    return jsonify(result)
 
 
 if __name__ == "__main__":
