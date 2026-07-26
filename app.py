@@ -1770,6 +1770,7 @@ def documents_page():
         "+'<button type=button data-act=chunks data-id=\"'+d.id+'\">Куски</button> '",
         "+'<button type=button data-act=prompt data-id=\"'+d.id+'\">Промт ф.1</button> '",
         "+'<button type=button data-act=run3 data-id=\"'+d.id+'\">Фаза 1 · 3 куска</button> '",
+        "+'<button type=button data-act=reset data-id=\"'+d.id+'\">Сброс known</button> '",
         "+'<button type=button data-act=del data-id=\"'+d.id+'\">Удалить</button>'",
         "+'<div id=ch-'+d.id+'></div></div>';",
         "}).join('');",
@@ -1832,6 +1833,13 @@ def documents_page():
         "box.innerHTML=box.innerHTML+' · timeout опроса';",
         "}catch(e){box.textContent='err '+e;}",
         "}",
+        "async function resetKnown(id){",
+        "if(!confirm('Сбросить known и журналы фаз?'))return;",
+        "const box=document.getElementById('ch-'+id);box.innerHTML='Сброс…';",
+        "const r=await fetch('/api/documents/'+id+'/known/reset?project='+encodeURIComponent(project),{method:'POST'});",
+        "const data=await r.json();",
+        "box.innerHTML='<pre class=box>'+JSON.stringify(data,null,2)+'</pre>';",
+        "}",
         "async function delDoc(id){",
         "if(!confirm('Удалить документ?'))return;",
         "await fetch('/api/documents/'+id+'?project='+encodeURIComponent(project),{method:'DELETE'});",
@@ -1844,6 +1852,7 @@ def documents_page():
         "else if(act==='chunks')buildChunks(id);",
         "else if(act==='prompt')showPrompt(id);",
         "else if(act==='run3')runPhase3(id);",
+        "else if(act==='reset')resetKnown(id);",
         "else if(act==='del')delDoc(id);",
         "});",
         "document.getElementById('up').onsubmit=async function(e){",
@@ -2155,6 +2164,18 @@ def api_debug_phase():
     except Exception as e:
         info["chunks_error"] = str(e)
     return jsonify(info)
+
+
+
+@app.route("/api/documents/<doc_id>/known/reset", methods=["POST"])
+def api_known_reset(doc_id):
+    try:
+        from phase_engine import reset_known
+    except Exception as e:
+        return jsonify({"ok": False, "error": repr(e)}), 500
+    body = request.get_json(silent=True) or {}
+    project = request.args.get("project") or body.get("project") or "detective_v7"
+    return jsonify(reset_known(project, doc_id))
 
 
 if __name__ == "__main__":

@@ -270,3 +270,16 @@ def start_phase_job(
 
 def get_phase_job(job_id: str) -> dict | None:
     return redis_get(_job_key(job_id))
+
+
+def reset_known(project: str, doc_id: str) -> dict:
+    """Сброс накопленных known_entities и журналов фаз для чистого прогона."""
+    redis_set(_known_key(project, doc_id), {})
+    # журналы фаз 0–11
+    for ph in range(0, 12):
+        redis_set(_phase_result_key(project, doc_id, ph), {"chunks": []})
+    meta = redis_get(_meta_key(project, doc_id)) or {}
+    if "status" in meta:
+        meta["status"] = {"phases": {}, "last_phase": None}
+        redis_set(_meta_key(project, doc_id), meta)
+    return {"ok": True, "doc_id": doc_id, "known_entities": {}, "phases_cleared": list(range(0, 12))}
