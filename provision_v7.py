@@ -452,7 +452,7 @@ def resume_missing_relations(api_func) -> dict:
     return journal.summary()
 
 
-def get_view_id(api_func, table_id: str) -> str | None:
+def get_view_id(api_func, table_id: str, journal=None) -> str | None:
     """
     POST /api/v1/wiki/views
     Возвращает id первого (основного) представления таблицы.
@@ -462,17 +462,27 @@ def get_view_id(api_func, table_id: str) -> str | None:
             "sourceId": table_id,
             "sourceType": "space",
         })
-        # Возможные формы ответа
+        raw = str(result)[:600]
+        if journal is not None:
+            journal.log("views_raw", True, f"{table_id}: {raw}")
+
         if isinstance(result, list) and result:
             return result[0].get("id") or result[0].get("viewId")
         if isinstance(result, dict):
-            items = result.get("items") or result.get("data") or result.get("views") or []
+            items = (
+                result.get("items")
+                or result.get("data")
+                or result.get("views")
+                or result.get("list")
+                or []
+            )
             if items:
                 return items[0].get("id") or items[0].get("viewId")
             return result.get("id") or result.get("viewId")
         return None
     except Exception as e:
-        print(f"[get_view_id] {table_id}: {e}")
+        if journal is not None:
+            journal.log("get_view_id", False, f"{table_id}: {e}")
         return None
 
 
@@ -562,7 +572,7 @@ def show_all_columns(api_func) -> dict:
             journal.log("show_columns", False, f"{key}: нет известных кодов")
             continue
 
-        view_id = get_view_id(api_func, table_id)
+        view_id = get_view_id(api_func, table_id, journal)
         if not view_id:
             journal.log("show_columns", False, f"{key}: не удалось получить viewId")
             continue
