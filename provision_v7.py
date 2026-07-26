@@ -582,3 +582,35 @@ def show_all_columns(api_func) -> dict:
 
     journal.log("done", True, "колонки сделаны видимыми")
     return journal.summary()
+
+
+def list_spaces(api_func) -> dict:
+    """
+    POST /api/v1/wiki/ql/spaces
+    Возвращает список пространств аккаунта.
+    """
+    payload = {
+        "query": {
+            "__filter": {
+                "keeping_types": ["default"],
+                "__text": {},
+                "__nested": {
+                    "keeping_types": ["default", "inlineContentDatabase"],
+                    "__text": {"query": ""},
+                },
+            },
+            "__sort": [{"user_pinned_at": "desc"}, {"created_at": "desc"}],
+            "__pagination": {"page": 1, "per_page": 50},
+            "id": True,
+            "title": True,
+            "description": True,
+            "keeping_type": True,
+            "pinned_at": True,
+            "nested_count": {"article": True},
+        }
+    }
+    try:
+        result = api_func("/api/v1/wiki/ql/spaces", payload)
+        return {"ok": True, "raw": result}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}

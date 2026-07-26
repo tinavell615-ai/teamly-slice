@@ -1411,103 +1411,68 @@ def get_descendants(event_id, children, depth_mode):
 
 @app.route("/", methods=["GET"])
 def index():
-    # Главы / Арки как основной выбор
-    error_msg = None
-    chapter_boxes = ""
-    event_boxes = ""
-    try:
-        chapters = get_chapters_for_select(PROJECTS["burevestnik"]["tables"]["chapters"])
-        for ch in chapters:
-            chapter_boxes += f'<label><input type="checkbox" name="chapters" value="{ch["id"]}"> {ch["title"]}</label>\n'
-        
-        # События оставляем как дополнительный режим
-        events = get_all_events(PROJECTS["burevestnik"]["tables"]["events"])
-        by_id, children, roots = build_tree(events)
-        selectable = []
-        for rid in roots:
-            selectable.append(by_id[rid])
-            for cid in children.get(rid, [])[:6]:
-                selectable.append(by_id[cid])
-        for ev in selectable:
-            event_boxes += f'<label><input type="checkbox" name="events" value="{ev["id"]}"> {ev["title"]}</label>\n'
-    except Exception as e:
-        error_msg = str(e)
-        chapter_boxes = ""
-        event_boxes = ""
-
+    projects_options = "".join(
+        f'<option value="{k}">{v.get("name", k)}</option>'
+        for k, v in PROJECTS.items()
+    )
     return f"""
 <!DOCTYPE html>
 <html lang="ru">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Срез Teamly</title>
-    <style>
-        body {{ font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 680px; margin: 40px auto; padding: 0 20px; color: #1a1a1a; }}
-        h1 {{ font-size: 1.5rem; }}
-        label {{ display: block; margin: 8px 0; }}
-        .section {{ margin: 22px 0; }}
-        .checkboxes {{ max-height: 280px; overflow-y: auto; border: 1px solid #ddd; padding: 12px; border-radius: 8px; }}
-        select {{ width: 100%; padding: 10px; font-size: 1rem; border-radius: 8px; border: 1px solid #ccc; }}
-        button {{ margin-top: 24px; width: 100%; padding: 14px; font-size: 1.1rem; background: #4f46e5; color: white; border: none; border-radius: 10px; cursor: pointer; }}
-        .hint {{ font-size: 0.85rem; color: #666; }}
-        .error {{ color: #b91c1c; background: #fef2f2; padding: 10px; border-radius: 8px; }}
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Detective Engine</title>
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 20px; color: #1a1a1a; line-height: 1.45; }}
+  h1 {{ font-size: 1.6rem; margin-bottom: 4px; }}
+  .sub {{ color: #666; margin-bottom: 28px; }}
+  nav {{ display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 32px; }}
+  nav a {{ display: inline-block; padding: 10px 16px; background: #f3f4f6; border-radius: 8px; text-decoration: none; color: #111; font-weight: 500; }}
+  nav a:hover {{ background: #e5e7eb; }}
+  nav a.primary {{ background: #4f46e5; color: white; }}
+  .card {{ border: 1px solid #e5e7eb; border-radius: 12px; padding: 20px; margin-bottom: 20px; }}
+  .card h2 {{ font-size: 1.1rem; margin: 0 0 8px; }}
+  .card p {{ margin: 0; color: #555; font-size: 0.95rem; }}
+  select, button {{ font-size: 1rem; padding: 10px 14px; border-radius: 8px; border: 1px solid #ccc; }}
+  button {{ background: #4f46e5; color: white; border: none; cursor: pointer; margin-top: 12px; }}
+</style>
 </head>
 <body>
-    <h1>Срез базы Teamly</h1>
-    <p class="hint">Выбери арки/главы — система подтянет то, что было до них</p>
+  <h1>Detective Engine</h1>
+  <p class="sub">Срезы · DELTA · Провижининг v7</p>
 
-    {"<div class='error'>Не удалось загрузить список событий: " + error_msg + "</div>" if error_msg else ""}
+  <nav>
+    <a class="primary" href="/">Срез</a>
+    <a href="/delta">DELTA</a>
+    <a href="/provision">Провижининг</a>
+    <a href="/status">Статус токена</a>
+    <a href="/spaces">Пространства</a>
+  </nav>
 
-    <form action="/slice" method="get">
-        <div class="section">
-            <strong>Проект</strong>
-            <select name="project">
-                <option value="burevestnik">Буревестник</option>
-            </select>
-        </div>
-
-        <div class="section">
-            <strong>Арки / Главы (можно несколько)</strong>
-            <div class="checkboxes">
-                {chapter_boxes if chapter_boxes else "<p>Главы не загрузились</p>"}
-            </div>
-            <p class="hint">Если ничего не выбрать — будут взяты все корневые события</p>
-        </div>
-
-        <div class="section">
-            <strong>Глубина внутри выбранного</strong>
-            <select name="depth">
-                <option value="arcs">Только выбранные (без детей)</option>
-                <option value="direct_children" selected>Выбранные + прямые дети</option>
-                <option value="scenes">Выбранные + вся глубина</option>
-            </select>
-        </div>
-
-        <div class="section">
-            <strong>Таблицы</strong>
-            <label><input type="checkbox" name="tables" value="characters" checked> Персонажи</label>
-            <label><input type="checkbox" name="tables" value="events" checked> События</label>
-            <label><input type="checkbox" name="tables" value="locations" checked> Локации</label>
-            <label><input type="checkbox" name="tables" value="direct_children"> Главы / Части</label>
-            <label><input type="checkbox" name="tables" value="world"> Мир</label>
-        </div>
-
-        <div class="section">
-            <strong>Объём</strong>
-            <select name="volume">
-                <option value="compact">Компактный (~45 тыс.)</option>
-                <option value="working" selected>Рабочий (~110 тыс.)</option>
-                <option value="full">Полный</option>
-            </select>
-        </div>
-
-        <button type="submit">Собрать срез</button>
+  <div class="card">
+    <h2>Собрать срез</h2>
+    <p>Выбери проект и параметры. Сейчас доступны Буревестник и тестовое пространство v7.</p>
+    <form action="/slice" method="get" style="margin-top:16px;">
+      <label><strong>Проект</strong></label><br>
+      <select name="project" style="width:100%; margin-top:6px;">
+        {projects_options}
+      </select>
+      <button type="submit">Перейти к параметрам среза →</button>
     </form>
+  </div>
+
+  <div class="card">
+    <h2>Быстрые ссылки</h2>
+    <p>
+      <a href="/delta">Обратный канал (DELTA)</a><br>
+      <a href="/provision">Провижининг пространства v7</a><br>
+      <a href="/status">Состояние OAuth-токена</a>
+    </p>
+  </div>
 </body>
 </html>
 """
+
 
 @app.route("/slice")
 def slice():
@@ -1679,11 +1644,12 @@ start_proactive_refresh()
 
 # ===================== PROVISION v7 (T3) =====================
 try:
-    from provision_v7 import provision_space, resume_missing_relations, show_all_columns
+    from provision_v7 import provision_space, resume_missing_relations, show_all_columns, list_spaces
 except ImportError:
     provision_space = None
     resume_missing_relations = None
     show_all_columns = None
+    list_spaces = None
 
 # Из успешного создания таблицы внутри пространства, созданного через API (26.07)
 KNOWN_SPACE_ID = "846990cf-487f-4650-9cf1-f396492d2e17"
@@ -1732,6 +1698,18 @@ def provision_endpoint():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
+
+
+@app.route("/spaces", methods=["GET"])
+def spaces_endpoint():
+    """Список пространств аккаунта через API."""
+    try:
+        from provision_v7 import list_spaces as _list
+    except ImportError:
+        return jsonify({"error": "list_spaces не найден"}), 500
+    result = _list(api)
+    return jsonify(result), 200 if result.get("ok") else 502
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
