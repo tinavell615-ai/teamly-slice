@@ -15,6 +15,7 @@ INITIAL_REFRESH_TOKEN = os.environ.get("REFRESH_TOKEN", "")
 UPSTASH_REDIS_REST_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "").rstrip("/")
 UPSTASH_REDIS_REST_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
 SLUG = "tina-vell"
+DEBUG_KEY = os.environ.get("DEBUG_KEY", "tvell-debug-2026")
 CLUSTER = "https://app.teamly.ru"
 TOKENS_KEY = "teamly_tokens"
 
@@ -85,8 +86,13 @@ def prop_code(project_key: str, tkey: str, prop_name: str) -> str:
     for name, meta in table.items():
         if reg_normalize(name) == reg_normalize(prop_name):
             if isinstance(meta, dict):
-                return meta.get("code") or ""
-            return str(meta)  # legacy plain code
+                code = meta.get("code")
+                if not code:
+                    raise UnknownPropertyCode(f"{tkey}.{prop_name}: код пустой в карте")
+                return code
+            if not meta:
+                raise UnknownPropertyCode(f"{tkey}.{prop_name}: код пустой в карте")
+            return str(meta)
     raise UnknownPropertyCode(f"{tkey}.{prop_name}: код неизвестен")
 
 def prop_meta(project_key: str, tkey: str, prop_name: str) -> dict:
@@ -111,8 +117,9 @@ def resolve_select_value(project_key: str, tkey: str, prop_name: str, text_value
         return text_value  # plain
     options = meta.get("options") or {}
     if not options:
-        # нет карты вариантов — пишем текст как есть (лучше, чем молчать)
-        return text_value
+        raise UnknownPropertyCode(
+            f"{tkey}.{prop_name}: карта вариантов селекта пуста (схема прочитана неполно)"
+        )
     key = text_value.strip()
     if key in options:
         return options[key]
@@ -726,6 +733,7 @@ def create_article_in_table(project_key: str, table_key: str, title: str, proper
             "entity": {
                 "spaceId": table_id,
                 "id": new_id,
+                "title": title,
                 "properties": prop_list
             }
         }
@@ -1391,8 +1399,7 @@ def build_project_schema_codes(project_key: str) -> dict:
     """
     Для каждой таблицы проекта: берёт первую карточку, читает schemaProperties,
     собирает карту кодов + options для select.
-    Пустые таблицы — создаёт техническую строку «[TECH] schema probe»,
-    читает схему, оставляет строку (автор удалит руками).
+    Пустые таблицы — помечаются missing (техстрока не создаётся: endpoint удаления неизвестен).
     Сохраняет в Redis schema:codes, schema:tables, schema:main_article.
     """
     from documents import redis_set, redis_get
@@ -1406,12 +1413,9 @@ def build_project_schema_codes(project_key: str) -> dict:
     missing = []
     raw_samples = []
     errors = []
-    tech_created = []
-
+    
     for tkey, table_id in tables.items():
         article_id = None
-        created_tech = False
-
         # 1. Попытка найти существующую карточку
         try:
             data = api("/api/v1/ql/content-database/content", {
@@ -1426,31 +1430,12 @@ def build_project_schema_codes(project_key: str) -> dict:
         except Exception as e:
             errors.append(f"{tkey}: list content failed: {e}")
 
-        # 2. Пустая таблица → создаём техническую строку
+        # 2. Пустая таблица — не создаём техстроку (endpoint удаления неизвестен).
+        # Помечаем missing. Класс уходит в карантин «коды свойств».
         if not article_id:
-            try:
-                # Создаём минимальную карточку без свойств (чтобы не зависеть от кодов)
-                new_id = str(uuid.uuid4())
-                payload = {
-                    "code": "article_create",
-                    "payload": {
-                        "entity": {
-                            "spaceId": table_id,
-                            "id": new_id,
-                            "title": "[TECH] schema probe",
-                            "properties": []
-                        }
-                    }
-                }
-                api("/api/v1/wiki/properties/command/execute", payload)
-                article_id = new_id
-                created_tech = True
-                tech_created.append({"table": tkey, "id": new_id})
-            except Exception as e:
-                errors.append(f"{tkey}: tech create failed: {e}")
-                missing.append({"table": tkey, "reason": f"empty + tech create failed: {e}"})
-                codes[tkey] = {}
-                continue
+            missing.append({"table": tkey, "reason": "empty or no rows — техстрока не создаётся (удаление неизвестно)"})
+            codes[tkey] = {}
+            continue
 
         # 3. Читаем схему
         try:
@@ -1458,7 +1443,6 @@ def build_project_schema_codes(project_key: str) -> dict:
             raw_samples.append({
                 "table": tkey,
                 "article_id": article_id,
-                "tech": created_tech,
                 "keys": list(raw.keys()) if isinstance(raw, dict) else type(raw).__name__
             })
             props = raw.get("schemaProperties")
@@ -1497,7 +1481,6 @@ def build_project_schema_codes(project_key: str) -> dict:
         "missing": missing,
         "errors": errors,
         "raw_samples": raw_samples,
-        "tech_created": tech_created,
         "counts": {k: len(v) for k, v in codes.items()},
     }
 
@@ -1896,7 +1879,7 @@ def slice():
 @app.route("/debug/refresh")
 def debug_refresh():
     key = request.args.get("key", "")
-    if key != "tvell-debug-2026":
+    if key != DEBUG_KEY:
         return jsonify({"error": "forbidden"}), 403
     try:
         with _lock:
@@ -1912,7 +1895,7 @@ def debug_refresh():
 def debug_token():
     """Отдаёт текущий access_token без refresh. Только для зонда."""
     key = request.args.get("key", "")
-    if key != "tvell-debug-2026":
+    if key != DEBUG_KEY:
         return jsonify({"error": "forbidden"}), 403
     try:
         token = get_token()  # может обновить, если уже истёк — это штатно для сервиса
@@ -1932,10 +1915,10 @@ def debug_schema():
     """
     Читает schemaProperties всех таблиц проекта и сохраняет карту кодов в Redis.
     ?project=detective_v7|burevestnik
-    ?key=tvell-debug-2026
+    ?key=<DEBUG_KEY>
     """
     key = request.args.get("key", "")
-    if key != "tvell-debug-2026":
+    if key != DEBUG_KEY:
         return jsonify({"error": "forbidden"}), 403
     project_key = request.args.get("project", "detective_v7")
     try:
