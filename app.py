@@ -2044,31 +2044,40 @@ def api_phase_run(doc_id):
     try:
         from phase_engine import run_chunk, run_phase_all_chunks
         from prompts import PHASES
-    except ImportError as e:
-        return jsonify({"error": str(e)}), 500
+    except Exception as e:
+        return jsonify({"ok": False, "error": "import", "detail": repr(e)}), 500
 
-    body = request.json if request.is_json else {}
-    project = request.args.get("project") or body.get("project") or "detective_v7"
     try:
-        phase = int(request.args.get("phase") or body.get("phase") or 1)
-    except (TypeError, ValueError):
-        return jsonify({"error": "phase must be int"}), 400
-    if phase not in PHASES:
-        return jsonify({"error": "unknown phase", "known": list(PHASES.keys())}), 400
-
-    chunk_id = request.args.get("chunk_id") or body.get("chunk_id")
-    max_chunks = body.get("max_chunks")
-    if max_chunks is not None:
+        body = request.get_json(silent=True) or {}
+        project = request.args.get("project") or body.get("project") or "detective_v7"
         try:
-            max_chunks = int(max_chunks)
+            phase = int(request.args.get("phase") or body.get("phase") or 1)
         except (TypeError, ValueError):
-            return jsonify({"error": "max_chunks must be int"}), 400
+            return jsonify({"ok": False, "error": "phase must be int"}), 400
+        if phase not in PHASES:
+            return jsonify({"ok": False, "error": "unknown phase", "known": list(PHASES.keys())}), 400
 
-    if chunk_id:
-        result = run_chunk(project, doc_id, chunk_id, phase)
-    else:
-        result = run_phase_all_chunks(project, doc_id, phase, max_chunks=max_chunks)
-    return jsonify(result), (200 if result.get("ok") else 400)
+        chunk_id = request.args.get("chunk_id") or body.get("chunk_id")
+        max_chunks = body.get("max_chunks")
+        if max_chunks is not None:
+            try:
+                max_chunks = int(max_chunks)
+            except (TypeError, ValueError):
+                return jsonify({"ok": False, "error": "max_chunks must be int"}), 400
+
+        if chunk_id:
+            result = run_chunk(project, doc_id, chunk_id, phase)
+        else:
+            result = run_phase_all_chunks(project, doc_id, phase, max_chunks=max_chunks)
+        return jsonify(result), (200 if result.get("ok") else 400)
+    except Exception as e:
+        import traceback
+        return jsonify({
+            "ok": False,
+            "error": "phase_run exception",
+            "detail": str(e),
+            "trace": traceback.format_exc()[-3000:],
+        }), 500
 
 
 if __name__ == "__main__":
