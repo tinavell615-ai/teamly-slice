@@ -1746,142 +1746,116 @@ def spaces_endpoint():
 @app.route("/documents")
 def documents_page():
     project = request.args.get("project", "detective_v7")
-    # project в JS — через json.dumps, остальной HTML без f-string-логики в script
     proj_js = json.dumps(project)
-    html = """<!DOCTYPE html>
-<html lang="ru"><head><meta charset="utf-8"><title>Документы</title>
-<style>
-body{font-family:system-ui,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem;background:#f7f7f8;color:#111}
-h1{font-size:1.4rem} a{color:#334}
-.card{background:#fff;border:1px solid #e5e5e5;border-radius:10px;padding:1rem 1.2rem;margin:0.8rem 0}
-.meta{color:#666;font-size:0.9rem}
-button,.btn{background:#111;color:#fff;border:0;border-radius:8px;padding:0.5rem 1rem;cursor:pointer;margin-right:0.3rem}
-input[type=file]{margin:0.5rem 0}
-.nav a{margin-right:1rem}
-ul.chapters{max-height:280px;overflow:auto;font-size:0.9rem}
-pre.box{white-space:pre-wrap;font-size:12px;max-height:320px;overflow:auto;background:#f0f0f0;padding:8px;border-radius:6px}
-</style></head><body>
-<div class="nav">
-  <a href="/">← Главная</a>
-  <a href="/documents?project=detective_v7">detective_v7</a>
-  <a href="/documents?project=burevestnik">burevestnik</a>
-</div>
-<h1>Документы · """ + project + """</h1>
-<div class="card">
-  <form id="up" enctype="multipart/form-data">
-    <input type="hidden" name="project" value=\"""" + project + """\">
-    <label>Загрузить .docx / .txt / .md (можно несколько)</label><br>
-    <input type="file" name="files" multiple accept=".docx,.txt,.md,.markdown">
-    <button type="submit">Загрузить</button>
-  </form>
-  <pre id="msg" class="meta"></pre>
-</div>
-<div id="list">Загрузка списка…</div>
-<script>
-const project = """ + proj_js + """;
-async function loadList() {
-  const el = document.getElementById('list');
-  try {
-    const r = await fetch('/api/documents?project=' + encodeURIComponent(project));
-    const text = await r.text();
-    let data;
-    try { data = JSON.parse(text); } catch (e) {
-      el.innerHTML = '<pre class="meta">HTTP ' + r.status + '\n' + text.slice(0, 800) + '</pre>';
-      return;
-    }
-    if (!r.ok) {
-      el.innerHTML = '<pre class="meta">HTTP ' + r.status + '\n' + JSON.stringify(data, null, 2) + '</pre>';
-      return;
-    }
-    if (!data.documents || !data.documents.length) {
-      el.innerHTML = '<p class="meta">Пока нет документов.</p>';
-      return;
-    }
-    el.innerHTML = data.documents.map(function(d) {
-      return '<div class="card">' +
-        '<strong>' + (d.filename || '') + '</strong>' +
-        '<div class="meta">' + (d.format || '') + ' · ~' + (d.pages_est || '?') + ' стр. · ~' + (d.tokens_est || '?') +
-        ' tok · глав: ' + (d.chapters_count || 0) +
-        (d.chunks_count ? (' · кусков: ' + d.chunks_count) : '') +
-        ' · ' + (d.created_at || '') + '</div>' +
-        '<div class="meta">id: ' + d.id + '</div>' +
-        '<button type="button" data-act="chapters" data-id="' + d.id + '">Главы</button>' +
-        '<button type="button" data-act="chunks" data-id="' + d.id + '">Куски</button>' +
-        '<button type="button" data-act="prompt" data-id="' + d.id + '">Промт ф.1</button>' +
-        '<button type="button" data-act="del" data-id="' + d.id + '">Удалить</button>' +
-        '<div id="ch-' + d.id + '"></div></div>';
-    }).join('');
-  } catch (e) {
-    el.innerHTML = '<pre class="meta">JS: ' + e + '</pre>';
-  }
-}
-async function showChapters(id) {
-  const box = document.getElementById('ch-' + id);
-  box.innerHTML = '<p class="meta">…</p>';
-  const r = await fetch('/api/documents/' + id + '?project=' + encodeURIComponent(project));
-  const d = await r.json();
-  if (!d.chapters) { box.textContent = d.error || 'нет глав'; return; }
-  box.innerHTML = '<ul class="chapters">' + d.chapters.map(function(c) {
-    return '<li>#' + c.index + ' ' + c.title + ' — ' + c.pages_est + ' стр. (' + c.chars + ' зн.)</li>';
-  }).join('') + '</ul>';
-}
-async function buildChunks(id) {
-  const box = document.getElementById('ch-' + id);
-  box.innerHTML = '<p class="meta">Нарезка…</p>';
-  const r = await fetch('/api/documents/' + id + '/chunks/build?project=' + encodeURIComponent(project), {method: 'POST'});
-  const data = await r.json();
-  if (!data.ok) { box.textContent = data.error || 'ошибка'; return; }
-  const params = data.params || {};
-  box.innerHTML = '<p class="meta">кусков: ' + data.chunks_count +
-    ' (цель ~' + (params.target_pages || '?') + ' стр., max ' + (params.max_pages || '?') +
-    ', overlap ' + (params.overlap_pages || '?') + ')</p><ul class="chapters">' +
-    (data.chunks || []).map(function(c) {
-      return '<li>' + c.id + ' · ' + c.chapter_title + ' ч.' + c.part + '/' + c.parts_total +
-        ' — ' + c.pages_est + ' стр. (' + c.chars + ' зн.)</li>';
-    }).join('') + '</ul>';
-}
-async function showPrompt(id) {
-  const box = document.getElementById('ch-' + id);
-  box.innerHTML = '<p class="meta">Сборка промта…</p>';
-  const r = await fetch('/api/documents/' + id + '/prompt?project=' + encodeURIComponent(project) + '&phase=1&preview=short');
-  const data = await r.json();
-  if (data.error) { box.textContent = data.error; return; }
-  box.innerHTML = '<p class="meta">фаза ' + data.phase + ': ' + data.phase_name +
-    ' · chunk ' + data.chunk_id +
-    ' · sys ~' + data.meta.system_tokens_est + ' tok, user ~' + data.meta.user_tokens_est + ' tok</p>' +
-    '<pre class="box">--- SYSTEM ---\n' + (data.system_preview || '') +
-    '\n\n--- USER ---\n' + (data.user_preview || '') + '</pre>';
-}
-async function delDoc(id) {
-  if (!confirm('Удалить документ?')) return;
-  await fetch('/api/documents/' + id + '?project=' + encodeURIComponent(project), {method: 'DELETE'});
-  loadList();
-}
-document.getElementById('list').addEventListener('click', function(ev) {
-  const btn = ev.target.closest('button[data-act]');
-  if (!btn) return;
-  const id = btn.getAttribute('data-id');
-  const act = btn.getAttribute('data-act');
-  if (act === 'chapters') showChapters(id);
-  else if (act === 'chunks') buildChunks(id);
-  else if (act === 'prompt') showPrompt(id);
-  else if (act === 'del') delDoc(id);
-});
-document.getElementById('up').onsubmit = async function(e) {
-  e.preventDefault();
-  const fd = new FormData(e.target);
-  const msg = document.getElementById('msg');
-  msg.textContent = 'Загрузка…';
-  const r = await fetch('/api/documents/upload', {method: 'POST', body: fd});
-  const data = await r.json();
-  msg.textContent = JSON.stringify(data, null, 2);
-  loadList();
-};
-loadList();
-</script>
-</body></html>"""
+    nl = "\n"
+    js_parts = [
+        "const project = " + proj_js + ";",
+        "async function loadList(){",
+        "const el=document.getElementById('list');",
+        "try{",
+        "const r=await fetch('/api/documents?project='+encodeURIComponent(project));",
+        "const text=await r.text();",
+        "let data;",
+        "try{data=JSON.parse(text);}catch(e){",
+        "el.innerHTML='<pre class=meta>HTTP '+r.status+' '+text.slice(0,800)+'</pre>';return;}",
+        "if(!r.ok){el.innerHTML='<pre class=meta>HTTP '+r.status+' '+JSON.stringify(data)+'</pre>';return;}",
+        "if(!data.documents||!data.documents.length){el.innerHTML='<p class=meta>Пока нет документов.</p>';return;}",
+        "el.innerHTML=data.documents.map(function(d){",
+        "return '<div class=card><strong>'+(d.filename||'')+'</strong>'",
+        "+'<div class=meta>'+(d.format||'')+' · ~'+(d.pages_est||'?')+' стр. · ~'+(d.tokens_est||'?')",
+        "+' tok · глав: '+(d.chapters_count||0)",
+        "+(d.chunks_count?(' · кусков: '+d.chunks_count):'')",
+        "+' · '+(d.created_at||'')+'</div>'",
+        "+'<div class=meta>id: '+d.id+'</div>'",
+        "+'<button type=button data-act=chapters data-id=\"'+d.id+'\">Главы</button> '",
+        "+'<button type=button data-act=chunks data-id=\"'+d.id+'\">Куски</button> '",
+        "+'<button type=button data-act=prompt data-id=\"'+d.id+'\">Промт ф.1</button> '",
+        "+'<button type=button data-act=del data-id=\"'+d.id+'\">Удалить</button>'",
+        "+'<div id=ch-'+d.id+'></div></div>';",
+        "}).join('');",
+        "}catch(e){el.innerHTML='<pre class=meta>JS: '+e+'</pre>';}",
+        "}",
+        "async function showChapters(id){",
+        "const box=document.getElementById('ch-'+id);box.innerHTML='…';",
+        "const r=await fetch('/api/documents/'+id+'?project='+encodeURIComponent(project));",
+        "const d=await r.json();",
+        "if(!d.chapters){box.textContent=d.error||'нет глав';return;}",
+        "box.innerHTML='<ul class=chapters>'+d.chapters.map(function(c){",
+        "return '<li>#'+c.index+' '+c.title+' — '+c.pages_est+' стр. ('+c.chars+' зн.)</li>';",
+        "}).join('')+'</ul>';",
+        "}",
+        "async function buildChunks(id){",
+        "const box=document.getElementById('ch-'+id);box.innerHTML='Нарезка…';",
+        "const r=await fetch('/api/documents/'+id+'/chunks/build?project='+encodeURIComponent(project),{method:'POST'});",
+        "const data=await r.json();",
+        "if(!data.ok){box.textContent=data.error||'ошибка';return;}",
+        "const p=data.params||{};",
+        "box.innerHTML='<p class=meta>кусков: '+data.chunks_count",
+        "+' (цель ~'+(p.target_pages||'?')+', max '+(p.max_pages||'?')+', overlap '+(p.overlap_pages||'?')+')</p>'",
+        "+'<ul class=chapters>'+(data.chunks||[]).map(function(c){",
+        "return '<li>'+c.id+' · '+c.chapter_title+' ч.'+c.part+'/'+c.parts_total+' — '+c.pages_est+' стр.</li>';",
+        "}).join('')+'</ul>';",
+        "}",
+        "async function showPrompt(id){",
+        "const box=document.getElementById('ch-'+id);box.innerHTML='Сборка промта…';",
+        "const r=await fetch('/api/documents/'+id+'/prompt?project='+encodeURIComponent(project)+'&phase=1&preview=short');",
+        "const data=await r.json();",
+        "if(data.error){box.textContent=data.error;return;}",
+        "box.innerHTML='<p class=meta>фаза '+data.phase+': '+data.phase_name",
+        "+' · chunk '+data.chunk_id",
+        "+' · sys ~'+data.meta.system_tokens_est+' tok, user ~'+data.meta.user_tokens_est+' tok</p>'",
+        "+'<pre class=box></pre>';",
+        "box.querySelector('pre').textContent='--- SYSTEM ---'+String.fromCharCode(10)+(data.system_preview||'')+String.fromCharCode(10,10)+'--- USER ---'+String.fromCharCode(10)+(data.user_preview||'');",
+        "}",
+        "async function delDoc(id){",
+        "if(!confirm('Удалить документ?'))return;",
+        "await fetch('/api/documents/'+id+'?project='+encodeURIComponent(project),{method:'DELETE'});",
+        "loadList();",
+        "}",
+        "document.getElementById('list').addEventListener('click',function(ev){",
+        "const btn=ev.target.closest('button[data-act]');if(!btn)return;",
+        "const id=btn.getAttribute('data-id');const act=btn.getAttribute('data-act');",
+        "if(act==='chapters')showChapters(id);",
+        "else if(act==='chunks')buildChunks(id);",
+        "else if(act==='prompt')showPrompt(id);",
+        "else if(act==='del')delDoc(id);",
+        "});",
+        "document.getElementById('up').onsubmit=async function(e){",
+        "e.preventDefault();const fd=new FormData(e.target);",
+        "const msg=document.getElementById('msg');msg.textContent='Загрузка…';",
+        "const r=await fetch('/api/documents/upload',{method:'POST',body:fd});",
+        "const data=await r.json();msg.textContent=JSON.stringify(data,null,2);loadList();",
+        "};",
+        "loadList();",
+    ]
+    js = "".join(js_parts)
+    html = (
+        "<!DOCTYPE html><html lang=ru><head><meta charset=utf-8><title>Документы</title>"
+        "<style>"
+        "body{font-family:system-ui,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem;background:#f7f7f8;color:#111}"
+        "h1{font-size:1.4rem}a{color:#334}"
+        ".card{background:#fff;border:1px solid #e5e5e5;border-radius:10px;padding:1rem 1.2rem;margin:0.8rem 0}"
+        ".meta{color:#666;font-size:0.9rem}"
+        "button{background:#111;color:#fff;border:0;border-radius:8px;padding:0.5rem 1rem;cursor:pointer;margin:0.2rem 0.3rem 0.2rem 0}"
+        ".nav a{margin-right:1rem}"
+        "ul.chapters{max-height:280px;overflow:auto;font-size:0.9rem}"
+        "pre.box{white-space:pre-wrap;font-size:12px;max-height:320px;overflow:auto;background:#f0f0f0;padding:8px;border-radius:6px}"
+        "</style></head><body>"
+        "<div class=nav><a href=/>← Главная</a> "
+        "<a href=/documents?project=detective_v7>detective_v7</a> "
+        "<a href=/documents?project=burevestnik>burevestnik</a></div>"
+        "<h1>Документы · " + project + "</h1>"
+        "<div class=card>"
+        "<form id=up enctype=multipart/form-data>"
+        '<input type=hidden name=project value="' + project + '">'
+        "<label>Загрузить .docx / .txt / .md</label><br>"
+        "<input type=file name=files multiple accept=.docx,.txt,.md,.markdown>"
+        "<button type=submit>Загрузить</button></form>"
+        "<pre id=msg class=meta></pre></div>"
+        "<div id=list>Загрузка списка…</div>"
+        "<script>" + js + "</script></body></html>"
+    )
     return Response(html, mimetype="text/html; charset=utf-8")
-
 
 
 @app.route("/api/documents", methods=["GET"])
