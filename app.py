@@ -2026,23 +2026,29 @@ def api_document_prompt(doc_id):
 @app.route("/api/llm/status", methods=["GET"])
 def api_llm_status():
     try:
-        from llm import llm_configured, LLM_BASE_URL, LLM_MODEL
+        from llm import llm_configured, LLM_BASE_URL, LLM_MODEL, llm_ping
     except ImportError as e:
         return jsonify({"ok": False, "error": str(e)}), 500
     key_set = llm_configured()
-    return jsonify({
+    ping = request.args.get("ping") == "1"
+    out = {
         "ok": True,
         "configured": key_set,
         "base_url": LLM_BASE_URL,
         "model": LLM_MODEL,
         "key_present": key_set,
-    })
+    }
+    if ping and key_set:
+        out["ping"] = llm_ping()
+    return jsonify(out)
+
 
 
 @app.route("/api/documents/<doc_id>/phase/run", methods=["POST"])
 def api_phase_run(doc_id):
+    """Стартует фоновую задачу. Сразу возвращает job_id."""
     try:
-        from phase_engine import run_chunk, run_phase_all_chunks
+        from phase_engine import start_phase_job
         from prompts import PHASES
     except Exception as e:
         return jsonify({"ok": False, "error": "import", "detail": repr(e)}), 500
@@ -2058,26 +2064,36 @@ def api_phase_run(doc_id):
             return jsonify({"ok": False, "error": "unknown phase", "known": list(PHASES.keys())}), 400
 
         chunk_id = request.args.get("chunk_id") or body.get("chunk_id")
-        max_chunks = body.get("max_chunks")
-        if max_chunks is not None:
-            try:
-                max_chunks = int(max_chunks)
-            except (TypeError, ValueError):
-                return jsonify({"ok": False, "error": "max_chunks must be int"}), 400
+        max_chunks = body.get("max_chunks", 1)
+        try:
+            max_chunks = int(max_chunks) if max_chunks is not None else 1
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "max_chunks must be int"}), 400
 
-        if chunk_id:
-            result = run_chunk(project, doc_id, chunk_id, phase)
-        else:
-            result = run_phase_all_chunks(project, doc_id, phase, max_chunks=max_chunks)
-        return jsonify(result), (200 if result.get("ok") else 400)
+        job = start_phase_job(
+            project, doc_id, phase, max_chunks=max_chunks, chunk_id=chunk_id
+        )
+        return jsonify(job)
     except Exception as e:
         import traceback
         return jsonify({
             "ok": False,
             "error": "phase_run exception",
             "detail": str(e),
-            "trace": traceback.format_exc()[-3000:],
+            "trace": traceback.format_exc()[-2000:],
         }), 500
+
+
+@app.route("/api/phase/job/<job_id>", methods=["GET"])
+def api_phase_job(job_id):
+    try:
+        from phase_engine import get_phase_job
+    except Exception as e:
+        return jsonify({"ok": False, "error": repr(e)}), 500
+    job = get_phase_job(job_id)
+    if not job:
+        return jsonify({"ok": False, "error": "job not found"}), 404
+    return jsonify({"ok": True, "job": job})
 
 
 if __name__ == "__main__":

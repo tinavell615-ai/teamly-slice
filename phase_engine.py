@@ -187,3 +187,67 @@ def run_phase_all_chunks(
         "stopped_on_error": errors[0] if errors else None,
         "known_entities": get_known_entities(project, doc_id),
     }
+
+
+# ---------- Фоновые задания ----------
+import threading
+import uuid
+
+_jobs_lock = threading.Lock()
+_jobs: dict[str, dict] = {}
+
+
+def _job_key(job_id: str) -> str:
+    return f"jobs:phase:{job_id}"
+
+
+def start_phase_job(
+    project: str,
+    doc_id: str,
+    phase: int,
+    *,
+    max_chunks: int | None = 1,
+    chunk_id: str | None = None,
+) -> dict:
+    job_id = str(uuid.uuid4())
+    job = {
+        "id": job_id,
+        "status": "queued",
+        "project": project,
+        "doc_id": doc_id,
+        "phase": phase,
+        "max_chunks": max_chunks,
+        "chunk_id": chunk_id,
+        "result": None,
+        "error": None,
+        "started_at": None,
+        "finished_at": None,
+    }
+    redis_set(_job_key(job_id), job)
+
+    def worker():
+        job["status"] = "running"
+        job["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        redis_set(_job_key(job_id), job)
+        try:
+            if chunk_id:
+                result = run_chunk(project, doc_id, chunk_id, phase)
+            else:
+                result = run_phase_all_chunks(project, doc_id, phase, max_chunks=max_chunks)
+            job["result"] = result
+            job["status"] = "done" if result.get("ok") else "error"
+            if not result.get("ok"):
+                job["error"] = result.get("error")
+        except Exception as e:
+            job["status"] = "error"
+            job["error"] = str(e)
+            job["result"] = {"ok": False, "error": str(e)}
+        job["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        redis_set(_job_key(job_id), job)
+
+    threading.Thread(target=worker, daemon=True).start()
+    return {"ok": True, "job_id": job_id, "status": "queued"}
+
+
+def get_phase_job(job_id: str) -> dict | None:
+    return redis_get(_job_key(job_id))

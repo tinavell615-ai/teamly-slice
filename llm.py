@@ -152,3 +152,17 @@ def parse_json_content(content: str | None) -> dict[str, Any]:
         return {"ok": True, "data": json.loads(text), "error": None}
     except json.JSONDecodeError as e:
         return {"ok": False, "error": f"json parse: {e}", "data": None, "raw": text[:2000]}
+
+
+def llm_ping() -> dict:
+    """Короткий запрос — проверка ключа и модели (~2–5 с)."""
+    return chat_completion(
+        messages=[
+            {"role": "system", "content": "Reply with valid json only."},
+            {"role": "user", "content": "Return json: {\"ping\": true, \"model_ok\": true}"},
+        ],
+        max_tokens=64,
+        temperature=0,
+        json_mode=True,
+        timeout=30,
+    )
