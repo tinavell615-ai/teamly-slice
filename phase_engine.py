@@ -90,6 +90,25 @@ def run_chunk(
     candidates = data.get("candidates") or []
     not_taken = data.get("not_taken") or []
 
+    # Жёсткий фильтр: только таблицы текущей фазы
+    phase_tables = PHASES.get(phase, {}).get("tables") or []
+    if phase_tables and phase_tables != ["*"]:
+        allowed = set(phase_tables)
+        kept, rejected = [], []
+        for item in delta:
+            tbl = item.get("table")
+            if tbl in allowed:
+                kept.append(item)
+            else:
+                rejected.append(item)
+                not_taken.append({
+                    "mention": item.get("title") or tbl,
+                    "why": f"не таблица фазы {phase} (отклонено сервером)",
+                    "table_attempted": tbl,
+                })
+        delta = kept
+        data["delta_rejected"] = rejected
+
     # обновить known
     new_known = merge_known_from_delta(known, delta)
     redis_set(_known_key(project, doc_id), new_known)
