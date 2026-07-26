@@ -2096,5 +2096,40 @@ def api_phase_job(job_id):
     return jsonify({"ok": True, "job": job})
 
 
+
+@app.route("/api/debug/phase", methods=["GET"])
+def api_debug_phase():
+    info = {}
+    try:
+        import phase_engine
+        info["phase_engine"] = "ok"
+        info["has_start"] = hasattr(phase_engine, "start_phase_job")
+        info["has_run_chunk"] = hasattr(phase_engine, "run_chunk")
+    except Exception as e:
+        import traceback
+        info["phase_engine"] = "fail"
+        info["error"] = str(e)
+        info["trace"] = traceback.format_exc()[-2000:]
+    try:
+        import prompts
+        info["prompts"] = "ok"
+        info["phases"] = list(prompts.PHASES.keys())
+    except Exception as e:
+        info["prompts"] = str(e)
+    try:
+        from documents import list_chunks, get_chunk
+        project = request.args.get("project", "detective_v7")
+        doc_id = request.args.get("doc_id", "8de824d3-a5b9-44fc-bfc9-739cf6835e7c")
+        chunks = list_chunks(project, doc_id)
+        info["chunks_count"] = len(chunks)
+        if chunks:
+            ch = get_chunk(project, doc_id, chunks[0]["id"])
+            info["first_chunk_id"] = chunks[0]["id"]
+            info["first_chunk_chars"] = len((ch or {}).get("text") or "")
+    except Exception as e:
+        info["chunks_error"] = str(e)
+    return jsonify(info)
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
