@@ -1817,7 +1817,7 @@ def documents_page():
         "const id=btn.getAttribute('data-id');const act=btn.getAttribute('data-act');",
         "if(act==='chapters')showChapters(id);",
         "else if(act==='chunks')buildChunks(id);",
-        "else if(act==='prompt')showPrompt(id);",
+        "else if(act==='prompt')showPrompt(id);else if(act==='run1')runPhaseOne(id);",
         "else if(act==='del')delDoc(id);",
         "});",
         "document.getElementById('up').onsubmit=async function(e){",
@@ -2020,6 +2020,55 @@ def api_document_prompt(doc_id):
             "user_preview": result["messages"][1]["content"][:800] + "…",
         }
     return jsonify(result)
+
+
+
+@app.route("/api/llm/status", methods=["GET"])
+def api_llm_status():
+    try:
+        from llm import llm_configured, LLM_BASE_URL, LLM_MODEL
+    except ImportError as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    key_set = llm_configured()
+    return jsonify({
+        "ok": True,
+        "configured": key_set,
+        "base_url": LLM_BASE_URL,
+        "model": LLM_MODEL,
+        "key_present": key_set,
+    })
+
+
+@app.route("/api/documents/<doc_id>/phase/run", methods=["POST"])
+def api_phase_run(doc_id):
+    try:
+        from phase_engine import run_chunk, run_phase_all_chunks
+        from prompts import PHASES
+    except ImportError as e:
+        return jsonify({"error": str(e)}), 500
+
+    body = request.json if request.is_json else {}
+    project = request.args.get("project") or body.get("project") or "detective_v7"
+    try:
+        phase = int(request.args.get("phase") or body.get("phase") or 1)
+    except (TypeError, ValueError):
+        return jsonify({"error": "phase must be int"}), 400
+    if phase not in PHASES:
+        return jsonify({"error": "unknown phase", "known": list(PHASES.keys())}), 400
+
+    chunk_id = request.args.get("chunk_id") or body.get("chunk_id")
+    max_chunks = body.get("max_chunks")
+    if max_chunks is not None:
+        try:
+            max_chunks = int(max_chunks)
+        except (TypeError, ValueError):
+            return jsonify({"error": "max_chunks must be int"}), 400
+
+    if chunk_id:
+        result = run_chunk(project, doc_id, chunk_id, phase)
+    else:
+        result = run_phase_all_chunks(project, doc_id, phase, max_chunks=max_chunks)
+    return jsonify(result), (200 if result.get("ok") else 400)
 
 
 if __name__ == "__main__":
