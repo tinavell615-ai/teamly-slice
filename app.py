@@ -1776,9 +1776,19 @@ ul.chapters{{max-height:200px;overflow:auto;font-size:0.9rem}}
 <script>
 const project = {json.dumps(project)};
 async function loadList(){{
-  const r = await fetch('/api/documents?project=' + encodeURIComponent(project));
-  const data = await r.json();
   const el = document.getElementById('list');
+  try {{
+  const r = await fetch('/api/documents?project=' + encodeURIComponent(project));
+  const text = await r.text();
+  let data;
+  try {{ data = JSON.parse(text); }} catch (e) {{
+    el.innerHTML = '<pre class="meta">HTTP ' + r.status + '\n' + text.slice(0,500) + '</pre>';
+    return;
+  }}
+  if (!r.ok) {{
+    el.innerHTML = '<pre class="meta">HTTP ' + r.status + '\n' + JSON.stringify(data,null,2) + '</pre>';
+    return;
+  }}
   if (!data.documents || !data.documents.length) {{
     el.innerHTML = '<p class="meta">Пока нет документов.</p>';
     return;
@@ -1794,6 +1804,9 @@ async function loadList(){{
       <button onclick="delDoc('${{d.id}}')">Удалить</button>
       <div id="ch-${{d.id}}"></div>
     </div>`).join('');
+}} catch (e) {{
+  el.innerHTML = '<pre class="meta">JS: ' + e + '</pre>';
+}}
 }}
 
 
@@ -1860,11 +1873,14 @@ loadList();
 def api_documents_list():
     try:
         from documents import list_documents
-    except ImportError:
-        return jsonify({"error": "documents module missing"}), 500
+    except ImportError as e:
+        return jsonify({"error": "documents module missing", "detail": str(e)}), 500
     project = request.args.get("project", "detective_v7")
-    docs = list_documents(project)
-    return jsonify({"project": project, "documents": docs})
+    try:
+        docs = list_documents(project)
+        return jsonify({"project": project, "documents": docs})
+    except Exception as e:
+        return jsonify({"error": "list_documents failed", "detail": str(e)}), 500
 
 
 @app.route("/api/documents/upload", methods=["POST"])
