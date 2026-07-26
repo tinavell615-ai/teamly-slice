@@ -11,6 +11,7 @@ from typing import Any
 from documents import get_chunk, list_chunks, redis_get, redis_set, _meta_key
 from llm import chat_completion, parse_json_content, llm_configured, LLM_MODEL
 from prompts import build_messages, PHASES
+from names import names_compatible as _names_compatible
 
 
 def _known_key(project: str, doc_id: str) -> str:
@@ -24,22 +25,6 @@ def _phase_result_key(project: str, doc_id: str, phase: int) -> str:
 def get_known_entities(project: str, doc_id: str) -> dict[str, list[str]]:
     data = redis_get(_known_key(project, doc_id))
     return data if isinstance(data, dict) else {}
-
-
-def _names_compatible(short: str, full: str) -> bool:
-    """«Том» покрывается «Том Реддл»; «Том (бармен)» — нет."""
-    s = short.casefold().strip()
-    f = full.casefold().strip()
-    if s == f:
-        return True
-    # уточнение в скобках = другой человек
-    if "(" in s or "(" in f:
-        return s == f
-    # short — первое слово full
-    f_parts = f.split()
-    if len(f_parts) >= 2 and s == f_parts[0]:
-        return True
-    return False
 
 
 def merge_known_from_delta(known: dict[str, list[str]], delta_items: list[dict]) -> dict[str, list[str]]:

@@ -2,6 +2,7 @@
 # Провижининг пространств и таблиц по схеме v7
 # Порядок: space → таблицы (только обычные колонки) → вторым проходом relations + rollups
 # Идемпотентность: по имени таблицы (если уже есть — пропускаем)
+# Слой 1: журнал сохраняется в Redis; коды уникальны внутри таблицы; main_article_id из ответа.
 
 import uuid
 import json
@@ -13,9 +14,6 @@ from schema_v7 import SCHEMA, CREATION_ORDER, SOURCE_OPTIONS
 
 # Пауза между запросами, чтобы не ловить 429
 REQUEST_DELAY = 0.55
-
-# Эти функции должны быть переданы из app (api, get_token и т.д.)
-# или импортированы, если модуль в том же процессе.
 
 CLUSTER = "https://app.teamly.ru"
 SLUG = "tina-vell"
@@ -38,6 +36,7 @@ class ProvisionJournal:
     def __init__(self):
         self.entries: list[dict] = []
         self.created_space_id: str | None = None
+        self.main_article_id: str | None = None
         self.table_ids: dict[str, str] = {}          # schema_key → contentDatabaseId
         self.property_codes: dict[str, dict[str, str]] = {}  # schema_key → {prop_name → code}
 
@@ -55,6 +54,7 @@ class ProvisionJournal:
     def summary(self) -> dict:
         return {
             "space_id": self.created_space_id,
+            "main_article_id": self.main_article_id,
             "tables": self.table_ids,
             "properties": self.property_codes,
             "log": self.entries,
@@ -64,7 +64,8 @@ class ProvisionJournal:
 def create_space(api_func, title: str, journal: ProvisionJournal) -> str | None:
     """
     POST /api/v1/space
-    Возвращает spaceId созданного пространства.
+    Всегда логирует полный сырой ответ.
+    Извлекает space_id и main_article_id. Если main_article_id нет — стоп (закон 2).
     """
     payload = {
         "title": title,
@@ -85,18 +86,46 @@ def create_space(api_func, title: str, journal: ProvisionJournal) -> str | None:
     }
     try:
         result = api_func("/api/v1/space", payload)
-        # Ожидаем, что в ответе есть id / spaceId
+        # Закон 2: полный сырой ответ всегда
+        journal.log("create_space_raw", True, "полный ответ POST /api/v1/space", data=result)
+
         space_id = (
             result.get("id")
             or result.get("spaceId")
-            or result.get("space", {}).get("id")
+            or (result.get("space") or {}).get("id")
         )
+        # Возможные поля main_article_id (не угадываем дальше — если нет, стоп)
+        main_article_id = (
+            result.get("mainArticleId")
+            or result.get("main_article_id")
+            or (result.get("mainArticle") or {}).get("id")
+            or (result.get("main_article") or {}).get("id")
+            or result.get("articleId")
+            or (result.get("space") or {}).get("mainArticleId")
+            or (result.get("data") or {}).get("mainArticleId")
+            or (result.get("data") or {}).get("main_article_id")
+        )
+
         if not space_id:
-            # иногда id лежит глубже
-            journal.log("create_space", False, f"нет id в ответе: {str(result)[:200]}")
+            journal.log("create_space", False, "нет space_id в ответе. Полный ответ в create_space_raw")
             return None
+        if not main_article_id:
+            journal.created_space_id = space_id
+            journal.log(
+                "create_space",
+                False,
+                "нет main_article_id в ответе — остановка. Полный сырой ответ залогирован. Не угадываем поле.",
+            )
+            return None
+
         journal.created_space_id = space_id
-        journal.log("create_space", True, f"title={title}", {"space_id": space_id})
+        journal.main_article_id = main_article_id
+        journal.log(
+            "create_space",
+            True,
+            f"title={title} space={space_id} main_article={main_article_id}",
+            {"space_id": space_id, "main_article_id": main_article_id},
+        )
         return space_id
     except Exception as e:
         journal.log("create_space", False, str(e))
@@ -113,7 +142,7 @@ def create_table(
 ) -> str | None:
     """
     POST /api/v1/content-database
-    По разведке 26.07: containerId = space_id, parentId = внутренний id пространства.
+    По разведке 26.07: containerId = space_id, parentId = внутренний id пространства (main_article_id).
     """
     payload = {
         "title": title,
@@ -150,6 +179,16 @@ def create_table(
         return None
 
 
+def _unique_code(journal: ProvisionJournal, schema_key: str) -> str:
+    """Генерирует код, уникальный внутри таблицы (защита от коллизии 4-hex)."""
+    existing = set((journal.property_codes.get(schema_key) or {}).values())
+    for _ in range(20):
+        code = _gen_code()
+        if code not in existing:
+            return code
+    return _gen_code()
+
+
 def create_property(
     api_func,
     table_id: str,
@@ -159,10 +198,10 @@ def create_property(
 ) -> str | None:
     """
     Создаёт обычную колонку (text / select / number) через schema_property_create.
-    Возвращает propertyCode.
+    Возвращает propertyCode. Код уникален внутри таблицы.
     """
     prop_id = _gen_id()
-    code = _gen_code()
+    code = _unique_code(journal, schema_key)
     entity = {
         "spaceId": table_id,
         "propertyId": prop_id,
@@ -175,8 +214,6 @@ def create_property(
         "hiddenType": "never",
         "sort": None,
     }
-    # Для select можно сразу передать options, но по разведке UI оставляет пустым.
-    # Пока оставляем {}.
 
     payload = {
         "code": "group",
@@ -215,10 +252,10 @@ def create_relation(
     schema_key: str,
 ) -> str | None:
     """
-    Создаёт колонку-связь (type=binding).
+    Создаёт колонку-связь (type=binding). Код уникален внутри таблицы.
     """
     prop_id = _gen_id()
-    code = _gen_code()
+    code = _unique_code(journal, schema_key)
     entity = {
         "spaceId": table_id,
         "propertyId": prop_id,
@@ -280,7 +317,6 @@ def configure_rollup(
     """
     Настраивает уже созданную колонку как роллап.
     """
-    # propertyId нам неизвестен после create, но Teamly принимает propertyCode
     payload = {
         "code": "schema_property_update",
         "payload": {
@@ -310,6 +346,7 @@ def configure_rollup(
 def provision_space(
     api_func,
     title: str,
+    project_key: str,
     parent_id: str | None = None,
     existing_space_id: str | None = None,
     tables_filter: list[str] | None = None,
@@ -318,11 +355,13 @@ def provision_space(
     Полный провижининг одного пространства по схеме v7.
 
     api_func — функция api(endpoint, payload) из app.
-    parent_id — внутренний parentId пространства (из разведки браузера).
-    existing_space_id — если задан, не создаём новое пространство, а используем это.
+    project_key — ключ проекта (detective_v7), под которым сохраняется карта в Redis.
+    parent_id — только если existing_space_id (для legacy); для нового берётся из journal.main_article_id.
+    existing_space_id — если задан, не создаём новое пространство.
     tables_filter — если задан, создаём только эти ключи (иначе все).
 
-    Возвращает journal.summary().
+    Возвращает journal.summary(). После успеха пишет в Redis:
+      schema:tables:{project_key}, schema:codes:{project_key}, provision:journal:{space_id}
     """
     journal = ProvisionJournal()
     keys = tables_filter or CREATION_ORDER
@@ -332,13 +371,17 @@ def provision_space(
         space_id = existing_space_id
         journal.created_space_id = space_id
         journal.log("create_space", True, f"используем существующее {space_id}")
+        if not parent_id:
+            journal.log("create_table", False, "для existing_space_id обязателен parent_id")
+            return journal.summary()
     else:
         space_id = create_space(api_func, title, journal)
-        if not space_id:
+        if not space_id or not journal.main_article_id:
             return journal.summary()
+        parent_id = journal.main_article_id
 
     if not parent_id:
-        journal.log("create_table", False, "parent_id не передан — таблицы создать нельзя")
+        journal.log("create_table", False, "parent_id отсутствует — таблицы создать нельзя")
         return journal.summary()
 
     # 2. Таблицы + обычные колонки
@@ -376,79 +419,20 @@ def provision_space(
                 continue
             create_relation(api_func, table_id, rel, target_id, journal, key)
 
-    # 4. Роллапы (пока только заготовка — нужны реальные propertyId/codes)
-    # Для Крючков «Дистанция» оставляем на ручную настройку или следующий шаг.
-
+    # 4. Роллапы (пока только заготовка)
     journal.log("done", True, f"пространство «{title}» готово")
-    return journal.summary()
 
+    # Сохранение журнала — обязательно до return (слой 1)
+    try:
+        from documents import redis_set
+        summary = journal.summary()
+        redis_set(f"provision:journal:{journal.created_space_id}", summary)
+        redis_set(f"schema:tables:{project_key}", summary["tables"])
+        redis_set(f"schema:codes:{project_key}", summary["properties"])
+        journal.log("redis_save", True, f"project_key={project_key} tables={len(summary['tables'])} props_tables={len(summary['properties'])}")
+    except Exception as e:
+        journal.log("redis_save", False, str(e))
 
-# ---------------------------------------------------------------------------
-# Известные ID из успешного провижининга 26.07.2026
-# ---------------------------------------------------------------------------
-
-KNOWN_TABLES = {
-    "world": "d024b1b2-f999-437b-affd-0fc259233fa3",
-    "locations": "d9ab271c-f7be-43a2-a158-d74ae959e279",
-    "characters": "f32e41c6-384b-4af1-8d54-cb5329a57c22",
-    "organizations": "d0db18e6-35d9-4b52-bfaa-152e4baeb93a",
-    "artifacts": "9259fcdc-288f-4924-b300-22ad61c7117c",
-    "lines": "ff412fe6-2a64-4588-bcf9-341a2ab1cdcc",
-    "events": "8ea0fdf1-2bec-4775-a571-d90f88ae8361",
-    "chapters": "616b179d-22be-4aa1-acdc-ae06b6743c68",
-    "hooks": "4d7e944d-19ca-4b01-90b7-2f2d2ff76fea",
-    "secrets": "9e9faf75-82e3-429e-8be6-5f07f2173614",
-    "references": "fda2d470-9b68-40b8-88dd-5102db9d836a",
-    "archive": "d0384707-f300-41ba-b4ea-a515a1b55394",
-}
-
-# Связи, которые упали с 429 при первом прогоне
-MISSING_RELATIONS = [
-    ("locations", "Контролирующая организация"),
-    ("characters", "Связанные персонажи"),
-    ("characters", "Организации"),
-    ("characters", "Артефакты"),
-    ("characters", "Ключевые события"),
-    ("characters", "Ключевые локации"),
-    ("characters", "Линии"),
-    ("organizations", "Родительская организация"),
-    ("organizations", "Руководство"),
-    ("organizations", "Члены"),
-    ("organizations", "Базовые локации"),
-    ("organizations", "Противники"),
-    ("organizations", "Артефакты"),
-]
-
-
-def resume_missing_relations(api_func) -> dict:
-    """
-    Досоздаёт только те связи, которые упали с 429.
-    """
-    journal = ProvisionJournal()
-    journal.table_ids = dict(KNOWN_TABLES)
-    journal.created_space_id = "846990cf-487f-4650-9cf1-f396492d2e17"
-
-    for schema_key, rel_name in MISSING_RELATIONS:
-        tbl = SCHEMA.get(schema_key)
-        if not tbl:
-            continue
-        table_id = KNOWN_TABLES.get(schema_key)
-        if not table_id:
-            continue
-
-        rel = next((r for r in tbl.get("relations", []) if r["name"] == rel_name), None)
-        if not rel:
-            journal.log("create_relation", False, f"{schema_key}.{rel_name}: нет в схеме")
-            continue
-
-        target_id = KNOWN_TABLES.get(rel["target"])
-        if not target_id:
-            journal.log("create_relation", False, f"{schema_key}.{rel_name}: нет target {rel['target']}")
-            continue
-
-        create_relation(api_func, table_id, rel, target_id, journal, schema_key)
-
-    journal.log("done", True, "недостающие связи досозданы")
     return journal.summary()
 
 
@@ -497,7 +481,6 @@ def show_columns(
     """
     Делает перечисленные property codes видимыми в представлении.
     """
-    # title всегда первый
     fields = ["title"] + [c for c in codes if c and c != "title"]
     payload = {
         "code": "group",
@@ -541,49 +524,6 @@ def show_columns(
         return False
 
 
-# Коды свойств из успешных прогонов (обычные + связи)
-KNOWN_CODES: dict[str, list[str]] = {
-    "world": ["a6df", "9f57", "c25d"],
-    "locations": ["931b", "ce47", "aa15", "eabc", "310a", "6907"],
-    "characters": ["e0a5", "f56d", "b36f", "d65e", "232e", "0ec3", "a725", "13db", "652d", "aa6c", "19cd"],
-    "organizations": ["3ae1", "c0bc", "b039", "f469", "46fe", "86d3", "797d", "6f21", "179e", "b03b", "3926"],
-    "artifacts": ["c98c", "02da", "2f5c", "cccf", "b390", "63cb", "aa7f", "9e2a", "d0a0", "6e4d"],
-    "lines": ["c8e9", "6791", "9cc6", "15f3", "d8dc", "5714"],
-    "events": ["0fd0", "572b", "c376", "de4c", "a8e4", "8e07", "61ce", "95be", "98bc", "d432", "661c", "f8c1"],
-    "chapters": ["b37e", "114c", "618a", "648e", "a688", "11ad", "ebd2", "d828", "a10b", "924b", "ac67"],
-    "hooks": ["d879", "c318", "5278", "3ee7", "19b5", "46f7", "d5a6", "cf8d", "7369", "2a19", "a246"],
-    "secrets": ["ffea", "fdef", "2e03", "d266", "6fb7", "a0d4", "63ea", "7c9c", "d424", "7cfc"],
-    "references": ["6117", "8cbd", "ab73", "fc11", "7d94", "542a", "bb62", "0fcc"],
-    "archive": ["6a40", "253a", "b0d5"],
-}
-
-
-def show_all_columns(api_func) -> dict:
-    """
-    Для каждой таблицы: получает viewId и делает все известные колонки видимыми.
-    """
-    journal = ProvisionJournal()
-    journal.table_ids = dict(KNOWN_TABLES)
-    journal.created_space_id = "846990cf-487f-4650-9cf1-f396492d2e17"
-
-    for key, table_id in KNOWN_TABLES.items():
-        codes = KNOWN_CODES.get(key, [])
-        if not codes:
-            journal.log("show_columns", False, f"{key}: нет известных кодов")
-            continue
-
-        view_id = get_view_id(api_func, table_id, journal)
-        if not view_id:
-            journal.log("show_columns", False, f"{key}: не удалось получить viewId")
-            continue
-
-        journal.log("get_view_id", True, f"{key} → {view_id}")
-        show_columns(api_func, table_id, view_id, codes, journal, key)
-
-    journal.log("done", True, "колонки сделаны видимыми")
-    return journal.summary()
-
-
 def list_spaces(api_func) -> dict:
     """
     POST /api/v1/wiki/ql/spaces
@@ -614,3 +554,24 @@ def list_spaces(api_func) -> dict:
         return {"ok": True, "raw": result}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+def resume_missing_relations(api_func) -> dict:
+    """
+    Устарело. Старое пространство удаляется. Для нового пространства
+    используйте полный provision_space.
+    """
+    return {
+        "ok": False,
+        "error": "resume_missing_relations устарело: KNOWN_TABLES удалены. Используйте полный провижининг нового пространства.",
+    }
+
+
+def show_all_columns(api_func) -> dict:
+    """
+    Устарело. Коды теперь в schema:codes:{project_key}.
+    """
+    return {
+        "ok": False,
+        "error": "show_all_columns устарело: KNOWN_CODES/KNOWN_TABLES удалены. После провижининга колонки создаются видимыми по умолчанию или через view API с кодами из Redis.",
+    }

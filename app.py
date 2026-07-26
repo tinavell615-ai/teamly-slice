@@ -57,6 +57,78 @@ PROJECTS = {
     },
 }
 
+# ===================== SCHEMA CODES (Слой 1) =====================
+from registry import normalize as reg_normalize, table_key as reg_table_key, DISPLAY as REG_DISPLAY, is_relation as reg_is_relation
+from names import names_compatible
+
+CODES: dict[str, dict] = {}  # project_key → {tkey → {prop_name → {code, type, options}}}
+
+class UnknownPropertyCode(Exception):
+    pass
+
+def load_codes_from_redis(project_key: str) -> bool:
+    """Загружает schema:codes:{project_key} в CODES. Возвращает True если карта есть."""
+    from documents import redis_get
+    data = redis_get(f"schema:codes:{project_key}")
+    if not data or not isinstance(data, dict):
+        CODES.pop(project_key, None)
+        return False
+    CODES[project_key] = data
+    return True
+
+def prop_code(project_key: str, tkey: str, prop_name: str) -> str:
+    table = CODES.get(project_key, {}).get(tkey)
+    if table is None:
+        raise UnknownPropertyCode(
+            f"нет карты кодов для таблицы «{tkey}» проекта «{project_key}»"
+        )
+    for name, meta in table.items():
+        if reg_normalize(name) == reg_normalize(prop_name):
+            if isinstance(meta, dict):
+                return meta.get("code") or ""
+            return str(meta)  # legacy plain code
+    raise UnknownPropertyCode(f"{tkey}.{prop_name}: код неизвестен")
+
+def prop_meta(project_key: str, tkey: str, prop_name: str) -> dict:
+    """Возвращает {code, type, options} или raises."""
+    table = CODES.get(project_key, {}).get(tkey)
+    if table is None:
+        raise UnknownPropertyCode(f"нет карты кодов для таблицы «{tkey}»")
+    for name, meta in table.items():
+        if reg_normalize(name) == reg_normalize(prop_name):
+            if isinstance(meta, dict):
+                return meta
+            return {"code": str(meta), "type": "text", "options": {}}
+    raise UnknownPropertyCode(f"{tkey}.{prop_name}: код неизвестен")
+
+def resolve_select_value(project_key: str, tkey: str, prop_name: str, text_value: str) -> str:
+    """
+    Для select возвращает option id. Если текст не найден — raises UnknownPropertyCode
+    с ясной причиной (не добавляем вариант автоматически).
+    """
+    meta = prop_meta(project_key, tkey, prop_name)
+    if meta.get("type") not in ("select", "multi_select", "status"):
+        return text_value  # plain
+    options = meta.get("options") or {}
+    if not options:
+        # нет карты вариантов — пишем текст как есть (лучше, чем молчать)
+        return text_value
+    key = text_value.strip()
+    if key in options:
+        return options[key]
+    key_cf = key.casefold()
+    if key_cf in options:
+        return options[key_cf]
+    # try partial
+    for otext, oid in options.items():
+        if otext.casefold() == key_cf:
+            return oid
+    raise UnknownPropertyCode(
+        f"{tkey}.{prop_name}: значение «{text_value}» отсутствует среди вариантов селекта. "
+        f"Доступные: {list(options.keys())[:12]}"
+    )
+
+
 
 # Маппинг внутренних ID свойств Teamly → читаемые названия
 # Зафиксировано по реальному срезу 25.07.2026. Стабильно, как ID таблиц.
@@ -309,11 +381,10 @@ def parse_delta(text: str) -> list:
                 if rest:
                     body_lines.append(rest)
             elif upper.startswith("ТЕЛО:") or upper == "ТЕЛО:":
-                in_body = True
-                body_mode = "replace"
-                rest = stripped.split(":", 1)[1].strip() if ":" in stripped else ""
-                if rest:
-                    body_lines.append(rest)
+                # Исход Б (слой 1): полная замена тела не поддерживается.
+                # Отказ виден автору до записи.
+                action["_error"] = "полная замена тела пока не поддерживается, используйте ТЕЛО-ДОПОЛНИТЬ"
+                body_mode = None
             elif ":" in stripped and not stripped.startswith("---"):
                 k, v = stripped.split(":", 1)
                 k = k.strip()
@@ -404,21 +475,7 @@ def build_preview(delta_text: str, project_key: str = "burevestnik") -> dict:
             # блокируем автоматическое применение
             preview["ok"] = False
 
-        # 2. Один персонаж = одна карточка (запрет «Тень Влада» при существующем «Влад»)
-        if table_key == "characters" and effective_action == "создать":
-            norm_new = normalize_title(title)
-            # проверяем, не является ли новое имя «расширением» уже существующего
-            per_table = resolver_data.get("per_table", {}).get("characters", {})
-            for existing_norm, matches in per_table.items():
-                if existing_norm and existing_norm != norm_new:
-                    # если существующее имя целиком входит в новое (и длиннее 3 символов)
-                    if len(existing_norm) > 3 and existing_norm in norm_new:
-                        existing_title = matches[0][1] if matches else existing_norm
-                        q = (f"⚠ Возможный дубль персонажа: «{title}» содержит существующее имя «{existing_title}». "
-                             f"По правилу «один персонаж = одна карточка» это, скорее всего, статус/форма, а не новая сущность.")
-                        if q not in preview["questions"]:
-                            preview["questions"].append(q)
-                            preview["warnings"].append(q)
+        # 2. Правило дубля персонажа (подстрока) удалено — см. names.py + task 6. Открытый карантин «Влад» закрывается единым резолвером.
 
         # 3. В полях связей — только чистые имена (без скобок и описаний)
         dirty_rel_props = []
@@ -620,10 +677,7 @@ def _log_write(action: str, title: str, table: str, success: bool, detail: str =
     print(f"[write] {status} | {table} | {action} | {title} | {detail[:120]}")
 
 # Обратный словарь label → code (берём первое вхождение)
-LABEL_TO_CODE = {}
-for code, label in PROPERTY_LABELS.items():
-    if label not in LABEL_TO_CODE:
-        LABEL_TO_CODE[label] = code
+# LABEL_TO_CODE удалён (слой 1) — используется prop_code / CODES
 
 def _get_table_id(project_key: str, table_key: str) -> str | None:
     project = PROJECTS.get(project_key)
@@ -631,29 +685,40 @@ def _get_table_id(project_key: str, table_key: str) -> str | None:
         return None
     return project["tables"].get(table_key)
 
-def create_article_in_table(table_id: str, title: str, properties: dict, project_key: str = "burevestnik") -> dict:
+def create_article_in_table(project_key: str, table_key: str, title: str, properties: dict) -> dict:
     """
-    Создаёт строку (статью) в умной таблице.
-    Возвращает {"ok": bool, "id": str|None, "error": str|None}
+    Создаёт строку в умной таблице.
+    Сигнатура: (project_key, table_key, ...) — table_id берётся из PROJECTS/registry.
+    Для select резолвит текст → option id. Неизвестный код/вариант → failed.
     """
+    if project_key not in CODES and not load_codes_from_redis(project_key):
+        return {"ok": False, "id": None, "error": "карта кодов не загружена, запись запрещена"}
+    project = PROJECTS.get(project_key)
+    if not project:
+        return {"ok": False, "id": None, "error": f"нет проекта {project_key}"}
+    table_id = (project.get("tables") or {}).get(table_key)
+    if not table_id:
+        # try redis tables
+        from documents import redis_get
+        tables = redis_get(f"schema:tables:{project_key}") or {}
+        table_id = tables.get(table_key)
+    if not table_id:
+        return {"ok": False, "id": None, "error": f"нет table_id для {table_key}"}
+
     new_id = str(uuid.uuid4())
     prop_list = []
-    for label, value in properties.items():
-        code = LABEL_TO_CODE.get(label)
-        if not code:
-            # пробуем нормализовать
-            for lab, c in LABEL_TO_CODE.items():
-                if lab.lower() == label.lower():
-                    code = c
-                    break
-        if code:
+    try:
+        for label, value in properties.items():
+            code = prop_code(project_key, table_key, label)
+            resolved = resolve_select_value(project_key, table_key, label, value)
             prop_list.append({
                 "method": "add",
                 "code": code,
-                "value": value
+                "value": resolved
             })
-        else:
-            print(f"[write] Нет code для свойства «{label}» — пропускаю")
+    except UnknownPropertyCode as e:
+        _log_write("create", title, table_id, False, str(e))
+        return {"ok": False, "id": None, "error": str(e)}
 
     payload = {
         "code": "article_create",
@@ -666,7 +731,6 @@ def create_article_in_table(table_id: str, title: str, properties: dict, project
         }
     }
     try:
-        # api() уже есть в приложении
         result = api("/api/v1/wiki/properties/command/execute", payload)
         _log_write("create", title, table_id, True, f"id={new_id}")
         return {"ok": True, "id": new_id, "error": None, "raw": result}
@@ -674,48 +738,65 @@ def create_article_in_table(table_id: str, title: str, properties: dict, project
         _log_write("create", title, table_id, False, str(e))
         return {"ok": False, "id": None, "error": str(e)}
 
-def update_article_properties(table_id: str, article_id: str, properties: dict, title: str = "") -> dict:
-    """
-    Обновляет свойства существующей карточки.
-    Пока используем тот же command/execute (точный code для set value может отличаться —
-    при живом тесте уточним). Пока пробуем article_update / property_set если упадёт.
-    """
-    prop_list = []
-    for label, value in properties.items():
-        code = LABEL_TO_CODE.get(label)
-        if not code:
-            for lab, c in LABEL_TO_CODE.items():
-                if lab.lower() == label.lower():
-                    code = c
-                    break
-        if code:
-            prop_list.append({
-                "method": "set",          # предположение; может быть "update" / "add"
-                "code": code,
-                "value": value
-            })
 
-    # Пробуем наиболее вероятный code
-    for try_code in ("article_update", "property_value_set", "schema_property_update"):
-        payload = {
-            "code": try_code,
-            "payload": {
-                "entity": {
-                    "spaceId": table_id,
-                    "id": article_id,
-                    "properties": prop_list
-                }
-            }
-        }
-        try:
-            result = api("/api/v1/wiki/properties/command/execute", payload)
-            _log_write("update_props", title or article_id, table_id, True, f"code={try_code}")
-            return {"ok": True, "error": None, "raw": result}
-        except Exception as e:
-            last_err = str(e)
-            continue
-    _log_write("update_props", title or article_id, table_id, False, last_err)
-    return {"ok": False, "error": last_err}
+def update_article_properties(project_key: str, table_key: str, article_id: str, properties: dict, title: str = "") -> dict:
+    """
+    Обновляет свойства. Форма подтверждена перехватом 26.07:
+    code=group → commands[] с property_update, одно свойство на команду.
+    select → option id.
+    """
+    if project_key not in CODES and not load_codes_from_redis(project_key):
+        return {"ok": False, "error": "карта кодов не загружена, запись запрещена"}
+    project = PROJECTS.get(project_key)
+    table_id = None
+    if project:
+        table_id = (project.get("tables") or {}).get(table_key)
+    if not table_id:
+        from documents import redis_get
+        tables = redis_get(f"schema:tables:{project_key}") or {}
+        table_id = tables.get(table_key)
+    if not table_id:
+        return {"ok": False, "error": f"нет table_id для {table_key}"}
+
+    commands = []
+    try:
+        for label, value in properties.items():
+            code = prop_code(project_key, table_key, label)
+            resolved = resolve_select_value(project_key, table_key, label, value)
+            commands.append({
+                "code": "property_update",
+                "payload": {
+                    "entity": {
+                        "spaceId": table_id,
+                        "articleId": article_id
+                    },
+                    "operation": {
+                        "method": "update",
+                        "code": code,
+                        "value": resolved
+                    }
+                },
+                "internal": False
+            })
+    except UnknownPropertyCode as e:
+        _log_write("update_props", title or article_id, table_id, False, str(e))
+        return {"ok": False, "error": str(e)}
+
+    if not commands:
+        return {"ok": True, "error": None}
+
+    payload = {
+        "code": "group",
+        "payload": {"commands": commands}
+    }
+    try:
+        result = api("/api/v1/wiki/properties/command/execute", payload)
+        _log_write("update_props", title or article_id, table_id, True, f"props={len(commands)}")
+        return {"ok": True, "error": None, "raw": result}
+    except Exception as e:
+        _log_write("update_props", title or article_id, table_id, False, str(e))
+        return {"ok": False, "error": str(e)}
+
 
 def append_body(space_id: str, article_id: str, text: str, title: str = "") -> dict:
     """
@@ -738,14 +819,9 @@ def append_body(space_id: str, article_id: str, text: str, title: str = "") -> d
         _log_write("append_body", title or article_id, space_id, False, str(e))
         return {"ok": False, "error": str(e)}
 
-def replace_body(space_id: str, article_id: str, text: str, title: str = "") -> dict:
-    """
-    Полная замена тела. Документация merge только добавляет.
-    Пока делаем append с пометкой; при живом тесте найдём endpoint replace.
-    """
-    # Временное решение: append с разделителем
-    marked = f"\n\n---\n[ПОЛНАЯ ЗАМЕНА ТЕЛА]\n{text}"
-    return append_body(space_id, article_id, marked, title)
+
+# replace_body удалён (исход Б): полная замена тела не поддерживается.
+# parse_delta должен отклонять ТЕЛО:
 
 def apply_delta(delta_text: str, project_key: str = "burevestnik") -> dict:
     """
@@ -795,7 +871,7 @@ def apply_delta(delta_text: str, project_key: str = "burevestnik") -> dict:
 
         try:
             if effective == "создать":
-                result = create_article_in_table(table_id, title, act["properties"], project_key)
+                result = create_article_in_table(project_key, table_key, title, act["properties"])
                 if not result["ok"]:
                     report["failed"].append({
                         "title": title,
@@ -806,16 +882,20 @@ def apply_delta(delta_text: str, project_key: str = "burevestnik") -> dict:
                 article_id = result["id"]
                 # тело
                 if act.get("body"):
-                    space_id = table_id  # в умной таблице spaceId = tableId
-                    if act["body_mode"] == "append":
-                        br = append_body(space_id, article_id, act["body"], title)
+                    if act.get("body_mode") == "append":
+                        br = append_body(table_id, article_id, act["body"], title)
+                        if not br["ok"]:
+                            report["failed"].append({
+                                "title": title,
+                                "table": act.get("table_display"),
+                                "error": f"Карточка создана, но тело не записалось: {br['error']}"
+                            })
+                            continue
                     else:
-                        br = replace_body(space_id, article_id, act["body"], title)
-                    if not br["ok"]:
                         report["failed"].append({
                             "title": title,
                             "table": act.get("table_display"),
-                            "error": f"Карточка создана, но тело не записалось: {br['error']}"
+                            "error": "полная замена тела пока не поддерживается, используйте ТЕЛО-ДОПОЛНИТЬ"
                         })
                         continue
                 report["applied"].append({
@@ -836,7 +916,7 @@ def apply_delta(delta_text: str, project_key: str = "burevestnik") -> dict:
                 article_id = res_name["id"]
                 # свойства
                 if act["properties"]:
-                    ur = update_article_properties(table_id, article_id, act["properties"], title)
+                    ur = update_article_properties(project_key, table_key, article_id, act["properties"], title)
                     if not ur["ok"]:
                         report["failed"].append({
                             "title": title,
@@ -846,15 +926,20 @@ def apply_delta(delta_text: str, project_key: str = "burevestnik") -> dict:
                         continue
                 # тело
                 if act.get("body"):
-                    if act["body_mode"] == "append":
+                    if act.get("body_mode") == "append":
                         br = append_body(table_id, article_id, act["body"], title)
+                        if not br["ok"]:
+                            report["failed"].append({
+                                "title": title,
+                                "table": act.get("table_display"),
+                                "error": f"Тело: {br['error']}"
+                            })
+                            continue
                     else:
-                        br = replace_body(table_id, article_id, act["body"], title)
-                    if not br["ok"]:
                         report["failed"].append({
                             "title": title,
                             "table": act.get("table_display"),
-                            "error": f"Тело: {br['error']}"
+                            "error": "полная замена тела пока не поддерживается, используйте ТЕЛО-ДОПОЛНИТЬ"
                         })
                         continue
                 report["applied"].append({
@@ -1235,6 +1320,148 @@ def get_card_full(cid):
         "body": extract_text(data.get("editorContent")),
         "parent_id": parent_id,
         "properties": props
+    }
+
+
+def fetch_article_schema(article_id: str) -> dict:
+    """
+    Читает schemaProperties карточки (и space) по форме из перехвата 26.07.
+    Возвращает сырой ответ. При 403/ошибке — Exception.
+    """
+    payload = {
+        "query": {
+            "__filter": {"id": article_id},
+            "id": True,
+            "title": True,
+            "schemaProperties": {
+                "propertyId": True, "name": True, "type": True,
+                "code": True, "format": True, "options": True
+            },
+            "space": {
+                "id": True, "title": True, "main_article_id": True,
+                "schemaProperties": {
+                    "propertyId": True, "name": True, "type": True,
+                    "code": True, "format": True, "options": True
+                }
+            }
+        }
+    }
+    return api("/api/v1/wiki/ql/article", payload)
+
+
+def _parse_schema_properties(raw_props) -> dict:
+    """
+    Превращает schemaProperties (list или dict) в
+    {name: {"code": str, "type": str, "options": {text: option_id}}}.
+    """
+    result = {}
+    if not raw_props:
+        return result
+    items = raw_props
+    if isinstance(raw_props, dict):
+        items = list(raw_props.values()) if not any(k in raw_props for k in ("name", "code")) else [raw_props]
+    if not isinstance(items, list):
+        return result
+    for p in items:
+        if not isinstance(p, dict):
+            continue
+        name = p.get("name") or ""
+        code = p.get("code") or ""
+        ptype = p.get("type") or p.get("format") or "text"
+        if not name or not code:
+            continue
+        options_map = {}
+        opts = p.get("options")
+        if isinstance(opts, dict):
+            # иногда options = {"items": [...]} или прямой dict
+            opts = opts.get("items") or opts.get("options") or opts.get("values") or list(opts.values()) if opts else []
+        if isinstance(opts, list):
+            for o in opts:
+                if isinstance(o, dict):
+                    oid = o.get("id") or o.get("optionId") or o.get("value")
+                    otext = o.get("name") or o.get("title") or o.get("text") or o.get("label") or str(o.get("value", ""))
+                    if oid and otext:
+                        options_map[otext.strip().casefold()] = oid
+                        options_map[otext.strip()] = oid  # keep original case too
+        result[name] = {"code": code, "type": ptype, "options": options_map}
+    return result
+
+
+def build_project_schema_codes(project_key: str) -> dict:
+    """
+    Для каждой таблицы проекта: берёт первую карточку, читает schemaProperties,
+    собирает карту кодов + options для select.
+    Пустые таблицы — пробует space.schemaProperties, иначе помечает.
+    Сохраняет в Redis schema:codes, schema:tables, schema:main_article.
+    Возвращает { "codes": {...}, "tables": {...}, "main_article_id": ..., "missing": [...], "raw_samples": [...] }
+    """
+    from documents import redis_set, redis_get
+    project = PROJECTS.get(project_key)
+    if not project:
+        return {"ok": False, "error": f"нет проекта {project_key}"}
+
+    codes = {}
+    tables = dict(project.get("tables") or {})
+    main_article_id = None
+    missing = []
+    raw_samples = []
+    errors = []
+
+    for tkey, table_id in tables.items():
+        # найти любую карточку
+        article_id = None
+        try:
+            data = api("/api/v1/ql/content-database/content", {
+                "query": {
+                    "__filter": {"contentDatabaseId": table_id},
+                    "content": {"article": {"id": True, "title": True}}
+                }
+            })
+            content = data.get("content") or []
+            if content:
+                article_id = content[0].get("article", {}).get("id")
+        except Exception as e:
+            errors.append(f"{tkey}: list content failed: {e}")
+
+        if not article_id:
+            missing.append({"table": tkey, "reason": "empty or no rows"})
+            codes[tkey] = {}
+            continue
+
+        try:
+            raw = fetch_article_schema(article_id)
+            raw_samples.append({"table": tkey, "article_id": article_id, "keys": list(raw.keys()) if isinstance(raw, dict) else type(raw).__name__})
+            # schemaProperties может быть на корне или в space
+            props = raw.get("schemaProperties")
+            if not props and isinstance(raw.get("space"), dict):
+                props = raw["space"].get("schemaProperties")
+            parsed = _parse_schema_properties(props)
+            codes[tkey] = parsed
+            if not main_article_id and isinstance(raw.get("space"), dict):
+                main_article_id = raw["space"].get("main_article_id") or raw["space"].get("mainArticleId")
+            if not parsed:
+                missing.append({"table": tkey, "reason": "schemaProperties empty or unparsed", "sample_keys": list((props or {}).keys()) if isinstance(props, dict) else str(type(props))})
+        except Exception as e:
+            errors.append(f"{tkey}: fetch schema failed: {e}")
+            codes[tkey] = {}
+            missing.append({"table": tkey, "reason": str(e)})
+
+    # save
+    redis_set(f"schema:codes:{project_key}", codes)
+    redis_set(f"schema:tables:{project_key}", tables)
+    if main_article_id:
+        redis_set(f"schema:main_article:{project_key}", main_article_id)
+
+    return {
+        "ok": True,
+        "project_key": project_key,
+        "codes": codes,
+        "tables": tables,
+        "main_article_id": main_article_id,
+        "missing": missing,
+        "errors": errors,
+        "raw_samples": raw_samples,
+        "counts": {k: len(v) for k, v in codes.items()},
     }
 
 def build_id_to_title(project):
@@ -1663,6 +1890,24 @@ def debug_token():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/debug/schema")
+def debug_schema():
+    """
+    Читает schemaProperties всех таблиц проекта и сохраняет карту кодов в Redis.
+    ?project=detective_v7|burevestnik
+    ?key=tvell-debug-2026
+    """
+    key = request.args.get("key", "")
+    if key != "tvell-debug-2026":
+        return jsonify({"error": "forbidden"}), 403
+    project_key = request.args.get("project", "detective_v7")
+    try:
+        result = build_project_schema_codes(project_key)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/status")
 def status():
     return jsonify(get_status())
@@ -1670,7 +1915,7 @@ def status():
 
 start_proactive_refresh()
 
-# ===================== PROVISION v7 (T3) =====================
+# ===================== PROVISION v7 (Слой 1) =====================
 try:
     from provision_v7 import provision_space, resume_missing_relations, show_all_columns, list_spaces
 except ImportError:
@@ -1679,26 +1924,23 @@ except ImportError:
     show_all_columns = None
     list_spaces = None
 
-# Из успешного создания таблицы внутри пространства, созданного через API (26.07)
-KNOWN_SPACE_ID = "846990cf-487f-4650-9cf1-f396492d2e17"
-KNOWN_PARENT_ID = "b35e2c9c-ea8e-493c-a8ed-ac3c9b87c45a"
-
 @app.route("/provision", methods=["GET"])
 def provision_endpoint():
     """
-    ?confirm=1          — полный провижининг (таблицы+колонки+связи)
-    ?mode=relations&confirm=1 — только недостающие связи (после 429)
+    ?confirm=1 — создать НОВОЕ пространство «Детективный движок v7 · 26.07.2026»
+                с project_key=detective_v7, сохранить карту кодов в Redis.
+    Старые KNOWN_* удалены. parent_id берётся из main_article_id ответа create_space.
     """
-    mode = request.args.get("mode", "full")
     confirm = request.args.get("confirm") == "1"
 
     if not confirm:
         return """
-        <h2>Провижининг v7</h2>
+        <h2>Провижининг v7 (Слой 1)</h2>
+        <p>Создаёт <b>новое</b> пространство «Детективный движок v7 · 26.07.2026».</p>
+        <p>Карта таблиц и кодов свойств сохраняется в Redis (schema:tables:detective_v7, schema:codes:detective_v7).</p>
+        <p>Старое тестовое пространство после успешной проверки автор удаляет руками.</p>
         <ul>
-          <li><a href="/provision?mode=columns&confirm=1"><b>Показать все колонки</b></a> (сделать видимыми во всех таблицах)</li>
-          <li><a href="/provision?mode=relations&confirm=1">Досоздать недостающие связи</a></li>
-          <li><a href="/provision?confirm=1">Полный повторный провижининг</a> (не рекомендуется)</li>
+          <li><a href="/provision?confirm=1"><b>Создать новое пространство v7</b></a></li>
         </ul>
         <p><a href="/">← Назад</a></p>
         """, 200, {"Content-Type": "text/html; charset=utf-8"}
@@ -1707,21 +1949,11 @@ def provision_endpoint():
         return jsonify({"error": "provision_v7.py не найден"}), 500
 
     try:
-        if mode == "relations":
-            if resume_missing_relations is None:
-                return jsonify({"error": "resume_missing_relations не найден"}), 500
-            result = resume_missing_relations(api)
-        elif mode == "columns":
-            if show_all_columns is None:
-                return jsonify({"error": "show_all_columns не найден"}), 500
-            result = show_all_columns(api)
-        else:
-            result = provision_space(
-                api,
-                title="(reuse)",
-                parent_id=KNOWN_PARENT_ID,
-                existing_space_id=KNOWN_SPACE_ID,
-            )
+        result = provision_space(
+            api,
+            title="Детективный движок v7 · 26.07.2026",
+            project_key="detective_v7",
+        )
         return jsonify(result), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
