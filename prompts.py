@@ -28,7 +28,13 @@ PHASES: dict[int, dict[str, Any]] = {
     2: {
         "name": "Пространство",
         "tables": ["locations"],
-        "goal": "Извлечь локации (иерархия через родителя, без транзитного мусора).",
+        "goal": (
+            "ТОЛЬКО локации. "
+            "Запрещено create в characters, events, organizations, artifacts, world, lines, hooks, secrets, chapters, references. "
+            "Иерархия: parent через имя родителя в properties. "
+            "Транзитные коридоры/проходы без отдельной смысловой нагрузки — not_taken. "
+            "Именование экземпляров — по стабильным признакам, не по событию."
+        ),
     },
     3: {
         "name": "Силы и предметы",
