@@ -1848,11 +1848,15 @@ def api_documents_upload():
         return jsonify({"error": "нет файлов"}), 400
     results = []
     for f in files:
-        raw = f.read()
-        if not raw:
-            continue
-        results.append(save_document(project, f.filename or "document.txt", raw))
-    return jsonify({"ok": True, "uploaded": results})
+        try:
+            raw = f.read()
+            if not raw:
+                continue
+            results.append(save_document(project, f.filename or "document.txt", raw))
+        except Exception as e:
+            results.append({"ok": False, "filename": f.filename, "error": str(e)})
+    ok = any(r.get("ok") for r in results) if results else False
+    return jsonify({"ok": ok, "uploaded": results}), (200 if ok else 400)
 
 
 @app.route("/api/documents/<doc_id>", methods=["GET"])

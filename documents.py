@@ -121,22 +121,39 @@ def extract_text_txt(raw: bytes) -> str:
 def extract_text_docx(raw: bytes) -> tuple[str, list[dict]]:
     """
     Возвращает (полный_текст, главы[{title, start_char, end_char, text}]).
-    Границы глав: стиль Heading 1/2 или параграф, похожий на «Глава N».
+    Без python-docx: zipfile + XML. Heading по pStyle, иначе regex «Глава N».
     """
-    from docx import Document
-    from docx.enum.style import WD_STYLE_TYPE
+    import zipfile
+    import xml.etree.ElementTree as ET
 
-    doc = Document(io.BytesIO(raw))
+    NS = {
+        "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+    }
+
     paragraphs: list[tuple[str, bool]] = []  # (text, is_heading)
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            xml_bytes = zf.read("word/document.xml")
+    except Exception as e:
+        raise ValueError(f"не удалось прочитать docx: {e}") from e
 
-    for p in doc.paragraphs:
-        text = (p.text or "").strip()
-        if not text:
-            paragraphs.append(("", False))
-            continue
-        style_name = (p.style.name or "") if p.style else ""
-        is_heading = style_name.startswith("Heading") or style_name.startswith("Заголовок")
-        if not is_heading and CHAPTER_TITLE_RE.match(text) and len(text) < 120:
+    root = ET.fromstring(xml_bytes)
+    for p_el in root.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p"):
+        texts = []
+        for t_el in p_el.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t"):
+            if t_el.text:
+                texts.append(t_el.text)
+            if t_el.tail:
+                texts.append(t_el.tail)
+        text = "".join(texts).strip()
+        style_name = ""
+        pPr = p_el.find("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}pPr")
+        if pPr is not None:
+            pStyle = pPr.find("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}pStyle")
+            if pStyle is not None:
+                style_name = pStyle.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val") or ""
+        is_heading = style_name.lower().startswith("heading") or style_name.startswith("Заголовок")
+        if not is_heading and text and CHAPTER_TITLE_RE.match(text) and len(text) < 120:
             is_heading = True
         paragraphs.append((text, is_heading))
 
