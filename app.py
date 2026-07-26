@@ -18,6 +18,14 @@ SLUG = "tina-vell"
 CLUSTER = "https://app.teamly.ru"
 TOKENS_KEY = "teamly_tokens"
 
+# ===================== LLM PROVIDER (сменный) =====================
+# Все поля из env — смена провайдера = правка Variables, не кода.
+LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://api.deepseek.com").rstrip("/")
+LLM_API_KEY = os.environ.get("LLM_API_KEY", "") or os.environ.get("DEEPSEEK_API_KEY", "")
+LLM_MODEL = os.environ.get("LLM_MODEL", "deepseek-v4-flash")
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "openai_compatible")  # openai_compatible | yandex | gigachat
+
+
 PROJECTS = {
     "burevestnik": {
         "name": "Буревестник",
@@ -1446,6 +1454,7 @@ def index():
     <a href="/delta">DELTA</a>
     <a href="/provision">Провижининг</a>
     <a href="/status">Статус токена</a>
+    <a href="/documents">Документы</a>
     <a href="/spaces">Пространства</a>
   </nav>
 
@@ -1729,6 +1738,160 @@ def spaces_endpoint():
         return jsonify({"error": "list_spaces не найден"}), 500
     result = _list(api)
     return jsonify(result), 200 if result.get("ok") else 502
+
+
+
+# ===================== DOCUMENTS (A) =====================
+@app.route("/documents")
+def documents_page():
+    project = request.args.get("project", "detective_v7")
+    html = f"""<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8"><title>Документы</title>
+<style>
+body{{font-family:system-ui,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem;background:#f7f7f8;color:#111}}
+h1{{font-size:1.4rem}} a{{color:#334}}
+.card{{background:#fff;border:1px solid #e5e5e5;border-radius:10px;padding:1rem 1.2rem;margin:0.8rem 0}}
+.meta{{color:#666;font-size:0.9rem}}
+button, .btn{{background:#111;color:#fff;border:0;border-radius:8px;padding:0.5rem 1rem;cursor:pointer}}
+input[type=file]{{margin:0.5rem 0}}
+.nav a{{margin-right:1rem}}
+ul.chapters{{max-height:200px;overflow:auto;font-size:0.9rem}}
+</style></head><body>
+<div class="nav">
+  <a href="/">← Главная</a>
+  <a href="/documents?project=detective_v7">detective_v7</a>
+  <a href="/documents?project=burevestnik">burevestnik</a>
+</div>
+<h1>Документы · {project}</h1>
+<div class="card">
+  <form id="up" enctype="multipart/form-data">
+    <input type="hidden" name="project" value="{project}">
+    <label>Загрузить .docx / .txt / .md (можно несколько)</label><br>
+    <input type="file" name="files" multiple accept=".docx,.txt,.md,.markdown">
+    <button type="submit">Загрузить</button>
+  </form>
+  <pre id="msg" class="meta"></pre>
+</div>
+<div id="list">Загрузка списка…</div>
+<script>
+const project = {json.dumps(project)};
+async function loadList(){{
+  const r = await fetch('/api/documents?project=' + encodeURIComponent(project));
+  const data = await r.json();
+  const el = document.getElementById('list');
+  if (!data.documents || !data.documents.length) {{
+    el.innerHTML = '<p class="meta">Пока нет документов.</p>';
+    return;
+  }}
+  el.innerHTML = data.documents.map(d => `
+    <div class="card">
+      <strong>${{d.filename}}</strong>
+      <div class="meta">${{d.format}} · ~${{d.pages_est}} стр. · ~${{d.tokens_est}} tok · глав: ${{d.chapters_count}} · ${{d.created_at}}</div>
+      <div class="meta">id: ${{d.id}}</div>
+      <button onclick="showChapters('${{d.id}}')">Главы</button>
+      <button onclick="delDoc('${{d.id}}')">Удалить</button>
+      <div id="ch-${{d.id}}"></div>
+    </div>`).join('');
+}}
+async function showChapters(id){{
+  const r = await fetch('/api/documents/' + id + '?project=' + encodeURIComponent(project));
+  const d = await r.json();
+  const box = document.getElementById('ch-' + id);
+  if (!d.chapters) {{ box.textContent = 'нет глав'; return; }}
+  box.innerHTML = '<ul class="chapters">' + d.chapters.map(c =>
+    `<li>#${{c.index}} ${{c.title}} — ${{c.pages_est}} стр. (${{c.chars}} зн.)</li>`
+  ).join('') + '</ul>';
+}}
+async function delDoc(id){{
+  if (!confirm('Удалить документ?')) return;
+  await fetch('/api/documents/' + id + '?project=' + encodeURIComponent(project), {{method:'DELETE'}});
+  loadList();
+}}
+document.getElementById('up').onsubmit = async (e) => {{
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const msg = document.getElementById('msg');
+  msg.textContent = 'Загрузка…';
+  const r = await fetch('/api/documents/upload', {{method:'POST', body: fd}});
+  const data = await r.json();
+  msg.textContent = JSON.stringify(data, null, 2);
+  loadList();
+}};
+loadList();
+</script>
+</body></html>"""
+    return Response(html, mimetype="text/html; charset=utf-8")
+
+
+@app.route("/api/documents", methods=["GET"])
+def api_documents_list():
+    try:
+        from documents import list_documents
+    except ImportError:
+        return jsonify({"error": "documents module missing"}), 500
+    project = request.args.get("project", "detective_v7")
+    docs = list_documents(project)
+    return jsonify({"project": project, "documents": docs})
+
+
+@app.route("/api/documents/upload", methods=["POST"])
+def api_documents_upload():
+    try:
+        from documents import save_document
+    except ImportError:
+        return jsonify({"error": "documents module missing"}), 500
+    project = request.form.get("project") or request.args.get("project") or "detective_v7"
+    files = request.files.getlist("files") or []
+    if not files and "file" in request.files:
+        files = [request.files["file"]]
+    if not files:
+        return jsonify({"error": "нет файлов"}), 400
+    results = []
+    for f in files:
+        raw = f.read()
+        if not raw:
+            continue
+        results.append(save_document(project, f.filename or "document.txt", raw))
+    return jsonify({"ok": True, "uploaded": results})
+
+
+@app.route("/api/documents/<doc_id>", methods=["GET"])
+def api_document_get(doc_id):
+    try:
+        from documents import get_document
+    except ImportError:
+        return jsonify({"error": "documents module missing"}), 500
+    project = request.args.get("project", "detective_v7")
+    include_text = request.args.get("text") == "1"
+    doc = get_document(project, doc_id, include_text=include_text)
+    if not doc:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(doc)
+
+
+@app.route("/api/documents/<doc_id>", methods=["DELETE"])
+def api_document_delete(doc_id):
+    try:
+        from documents import delete_document
+    except ImportError:
+        return jsonify({"error": "documents module missing"}), 500
+    project = request.args.get("project", "detective_v7")
+    delete_document(project, doc_id)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/documents/<doc_id>/chapters/<int:chapter_index>", methods=["GET"])
+def api_document_chapter(doc_id, chapter_index):
+    try:
+        from documents import get_chapter
+    except ImportError:
+        return jsonify({"error": "documents module missing"}), 500
+    project = request.args.get("project", "detective_v7")
+    ch = get_chapter(project, doc_id, chapter_index)
+    if not ch:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(ch)
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
