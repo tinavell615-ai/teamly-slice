@@ -247,16 +247,52 @@ def start_phase_job(
     def worker():
         job["status"] = "running"
         job["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        job["progress"] = {"done": 0, "total": None, "last_chunk": None}
         redis_set(_job_key(job_id), job)
         try:
             if chunk_id:
                 result = run_chunk(project, doc_id, chunk_id, phase)
+                job["progress"] = {"done": 1, "total": 1, "last_chunk": chunk_id}
             else:
-                result = run_phase_all_chunks(project, doc_id, phase, max_chunks=max_chunks)
+                # пошагово, с записью прогресса
+                from documents import list_chunks
+                chunks = list_chunks(project, doc_id, include_text=False)
+                if max_chunks is not None:
+                    chunks = chunks[: int(max_chunks)]
+                job["progress"]["total"] = len(chunks)
+                redis_set(_job_key(job_id), job)
+                results = []
+                errors = []
+                for i, ch in enumerate(chunks):
+                    job["progress"]["last_chunk"] = ch["id"]
+                    job["progress"]["done"] = i  # текущий в работе
+                    redis_set(_job_key(job_id), job)
+                    r = run_chunk(project, doc_id, ch["id"], phase)
+                    results.append({
+                        "chunk_id": ch["id"],
+                        "ok": r.get("ok"),
+                        "delta_count": r.get("delta_count"),
+                        "error": r.get("error"),
+                        "latency_ms": r.get("latency_ms"),
+                    })
+                    job["progress"]["done"] = i + 1
+                    redis_set(_job_key(job_id), job)
+                    if not r.get("ok"):
+                        errors.append(r)
+                        break
+                    time.sleep(0.5)
+                result = {
+                    "ok": len(errors) == 0 and len(results) > 0,
+                    "phase": phase,
+                    "processed": len(results),
+                    "results": results,
+                    "stopped_on_error": errors[0] if errors else None,
+                    "known_entities": get_known_entities(project, doc_id),
+                }
             job["result"] = result
             job["status"] = "done" if result.get("ok") else "error"
             if not result.get("ok"):
-                job["error"] = result.get("error")
+                job["error"] = result.get("error") or (result.get("stopped_on_error") or {}).get("error")
         except Exception as e:
             job["status"] = "error"
             job["error"] = str(e)
