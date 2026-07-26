@@ -1635,6 +1635,25 @@ def debug_refresh():
         return jsonify({"error": str(e), "force_refresh_ok": False}), 500
 
 
+@app.route("/debug/token")
+def debug_token():
+    """Отдаёт текущий access_token без refresh. Только для зонда."""
+    key = request.args.get("key", "")
+    if key != "tvell-debug-2026":
+        return jsonify({"error": "forbidden"}), 403
+    try:
+        token = get_token()  # может обновить, если уже истёк — это штатно для сервиса
+        if not token:
+            return jsonify({"error": "no access_token"}), 503
+        return jsonify({
+            "access_token": token,
+            "token_type": "Bearer",
+            "source": "service",
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/status")
 def status():
     return jsonify(get_status())
