@@ -121,12 +121,11 @@ def resolve_select_value(project_key: str, tkey: str, prop_name: str, text_value
             f"{tkey}.{prop_name}: карта вариантов селекта пуста (схема прочитана неполно)"
         )
     key = text_value.strip()
+    key_cf = key.casefold()
+    # точное
     if key in options:
         return options[key]
-    key_cf = key.casefold()
-    if key_cf in options:
-        return options[key_cf]
-    # try partial
+    # case-insensitive (один ключ на вариант)
     for otext, oid in options.items():
         if otext.casefold() == key_cf:
             return oid
@@ -1387,10 +1386,10 @@ def _parse_schema_properties(raw_props) -> dict:
             for o in opts:
                 if isinstance(o, dict):
                     oid = o.get("id") or o.get("optionId") or o.get("value")
-                    otext = o.get("name") or o.get("title") or o.get("text") or o.get("label") or str(o.get("value", ""))
+                    otext = (o.get("name") or o.get("title") or o.get("text") or o.get("label") or str(o.get("value", ""))).strip()
                     if oid and otext:
-                        options_map[otext.strip().casefold()] = oid
-                        options_map[otext.strip()] = oid  # keep original case too
+                        # один ключ на вариант (оригинал). Сравнение — через casefold в resolve.
+                        options_map[otext] = oid
         result[name] = {"code": code, "type": ptype, "options": options_map}
     return result
 
@@ -1466,7 +1465,39 @@ def build_project_schema_codes(project_key: str) -> dict:
             codes[tkey] = {}
             missing.append({"table": tkey, "reason": str(e)})
 
-    # save
+    # Защита карты: не сохранять полностью пустую, не затирать непустую пустой
+    total_codes = sum(len(v) for v in codes.values())
+    from documents import redis_get
+    existing = redis_get(f"schema:codes:{project_key}")
+    existing_count = sum(len(v) for v in (existing or {}).values()) if isinstance(existing, dict) else 0
+
+    if total_codes == 0:
+        return {
+            "ok": False,
+            "error": "карта кодов пуста (все таблицы без строк или schemaProperties не отдались)",
+            "project_key": project_key,
+            "codes": codes,
+            "tables": tables,
+            "main_article_id": main_article_id,
+            "missing": missing,
+            "errors": errors,
+            "raw_samples": raw_samples,
+            "counts": {k: len(v) for k, v in codes.items()},
+        }
+
+    if existing_count > 0 and total_codes < existing_count:
+        # не затираем более полную карту
+        return {
+            "ok": False,
+            "error": f"отказ перезаписать карту: существующая имеет {existing_count} кодов, новая — {total_codes}",
+            "project_key": project_key,
+            "codes": codes,
+            "tables": tables,
+            "missing": missing,
+            "errors": errors,
+            "counts": {k: len(v) for k, v in codes.items()},
+        }
+
     redis_set(f"schema:codes:{project_key}", codes)
     redis_set(f"schema:tables:{project_key}", tables)
     if main_article_id:
