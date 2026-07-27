@@ -1,0 +1,15 @@
+{
+  "name": "03_related_elements_no_target",
+  "kind": "write_property",
+  "project": "burevestnik",
+  "table": "world",
+  "label": "Связанные элементы",
+  "value": "Гриффиндор",
+  "expect": {
+    "ok": false,
+    "error_contains": [
+      "цель не выведена",
+      "Связанные элементы"
+    ]
+  }
+}

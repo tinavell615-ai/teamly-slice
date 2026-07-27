@@ -1,0 +1,16 @@
+{
+  "name": "02_no_visible_column",
+  "kind": "write_property",
+  "project": "burevestnik",
+  "table": "events",
+  "label": "📖 Главы / Части",
+  "value": "Глава 5",
+  "expect": {
+    "ok": false,
+    "error_contains": [
+      "видимой",
+      "chapters",
+      "Глав"
+    ]
+  }
+}

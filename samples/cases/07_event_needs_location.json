@@ -1,0 +1,11 @@
+{
+  "name": "07_event_needs_location",
+  "kind": "preview",
+  "project": "burevestnik",
+  "delta": "ТАБЛИЦА: События\nНАЗВАНИЕ: 🟥 Событие без места\nДЕЙСТВИЕ: создать\n",
+  "expect": {
+    "warnings_contain": [
+      "локац"
+    ]
+  }
+}

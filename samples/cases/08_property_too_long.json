@@ -1,0 +1,12 @@
+{
+  "name": "08_property_too_long",
+  "kind": "preview",
+  "project": "burevestnik",
+  "delta": "ТАБЛИЦА: Персонажи\nНАЗВАНИЕ: Том Реддл\nТекущий возрастной слой: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n",
+  "expect": {
+    "warnings_contain": [
+      "длинн",
+      "ТЕЛЕ"
+    ]
+  }
+}

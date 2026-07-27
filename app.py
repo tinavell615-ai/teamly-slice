@@ -58,86 +58,23 @@ PROJECTS = {
     },
 }
 
-# ===================== SCHEMA CODES (Слой 1) =====================
-from registry import normalize as reg_normalize, table_key as reg_table_key, DISPLAY as REG_DISPLAY, is_relation as reg_is_relation, relation_target as reg_relation_target, EMOJI as REG_EMOJI
+# ===================== SCHEMA CODES (Слой 2) =====================
+# Владение картой перенесено в schema_live.py (один источник правды).
+from registry import normalize as reg_normalize, table_key as reg_table_key, DISPLAY as REG_DISPLAY, is_relation as reg_is_relation, relation_target as reg_relation_target, EMOJI as REG_EMOJI, choose_visible_binding
 from rules import RULES
 from names import names_compatible
+from schema_live import (
+    CODES,
+    UnknownPropertyCode,
+    load_codes_from_redis,
+    prop_code,
+    prop_meta,
+    resolve_select_value,
+    get_codes,
+    ensure_codes,
+)
 
-CODES: dict[str, dict] = {}  # project_key → {tkey → {prop_name → {code, type, options}}}
-
-class UnknownPropertyCode(Exception):
-    pass
-
-def load_codes_from_redis(project_key: str) -> bool:
-    """Загружает schema:codes:{project_key} в CODES. Возвращает True если карта есть."""
-    from documents import redis_get
-    data = redis_get(f"schema:codes:{project_key}")
-    if not data or not isinstance(data, dict):
-        CODES.pop(project_key, None)
-        return False
-    CODES[project_key] = data
-    return True
-
-def prop_code(project_key: str, tkey: str, prop_name: str) -> str:
-    table = CODES.get(project_key, {}).get(tkey)
-    if table is None:
-        raise UnknownPropertyCode(
-            f"нет карты кодов для таблицы «{tkey}» проекта «{project_key}»"
-        )
-    for name, meta in table.items():
-        if reg_normalize(name) == reg_normalize(prop_name):
-            if isinstance(meta, dict):
-                code = meta.get("code")
-                if not code:
-                    raise UnknownPropertyCode(f"{tkey}.{prop_name}: код пустой в карте")
-                return code
-            if not meta:
-                raise UnknownPropertyCode(f"{tkey}.{prop_name}: код пустой в карте")
-            return str(meta)
-    raise UnknownPropertyCode(f"{tkey}.{prop_name}: код неизвестен")
-
-def prop_meta(project_key: str, tkey: str, prop_name: str) -> dict:
-    """Возвращает {code, type, options} или raises."""
-    table = CODES.get(project_key, {}).get(tkey)
-    if table is None:
-        raise UnknownPropertyCode(f"нет карты кодов для таблицы «{tkey}»")
-    for name, meta in table.items():
-        if reg_normalize(name) == reg_normalize(prop_name):
-            if isinstance(meta, dict):
-                return meta
-            return {"code": str(meta), "type": "text", "options": {}}
-    raise UnknownPropertyCode(f"{tkey}.{prop_name}: код неизвестен")
-
-def resolve_select_value(project_key: str, tkey: str, prop_name: str, text_value: str) -> str:
-    """
-    Для select возвращает option id. Если текст не найден — raises UnknownPropertyCode
-    с ясной причиной (не добавляем вариант автоматически).
-    """
-    meta = prop_meta(project_key, tkey, prop_name)
-    if meta.get("type") not in ("select", "multi_select", "status"):
-        return text_value  # plain
-    options = meta.get("options") or {}
-    if not options:
-        raise UnknownPropertyCode(
-            f"{tkey}.{prop_name}: карта вариантов селекта пуста (схема прочитана неполно)"
-        )
-    key = text_value.strip()
-    key_cf = key.casefold()
-    # точное
-    if key in options:
-        return options[key]
-    # case-insensitive (один ключ на вариант)
-    for otext, oid in options.items():
-        if otext.casefold() == key_cf:
-            return oid
-    raise UnknownPropertyCode(
-        f"{tkey}.{prop_name}: значение «{text_value}» отсутствует среди вариантов селекта. "
-        f"Доступные: {list(options.keys())[:12]}"
-    )
-
-
-
-# PROPERTY_LABELS удалён (слой 1). Коды читаются из schema:codes.
+# PROPERTY_LABELS удалён (слой 1). Коды читаются из schema:codes через schema_live.
 
 VOLUME_LIMITS = {
     "compact": 45000,
@@ -352,12 +289,23 @@ def parse_delta(text: str) -> list:
     return actions
 
 
-def build_preview(delta_text: str, project_key: str = "burevestnik") -> dict:
+def build_preview(
+    delta_text: str,
+    project_key: str = "burevestnik",
+    *,
+    codes: dict | None = None,
+    resolver_data: dict | None = None,
+) -> dict:
     """
     Полный предпросмотр: creates / updates / warnings / questions.
+    codes / resolver_data — опционально для offline-прогона (задача 5).
+    Если не переданы — берутся из живой схемы / Redis.
     """
     actions = parse_delta(delta_text)
-    resolver_data = build_title_to_ids(project_key)
+    if resolver_data is None:
+        resolver_data = build_title_to_ids(project_key)
+    # codes НЕ пишем в глобальную карту (закон 4 + изоляция процесса).
+    # Offline-прогон (run_samples.py) вызывает set_codes один раз в своём процессе до build_preview.
 
     preview = {
         "creates": [],
@@ -427,9 +375,25 @@ def build_preview(delta_text: str, project_key: str = "burevestnik") -> dict:
 
         # ========== РЕЗОЛВ СВЯЗЕЙ (после валидации) ==========
         for prop_name, prop_val in act["properties"].items():
-            if not reg_is_relation(table_key, prop_name):
+            if not reg_is_relation(table_key, prop_name, project_key):
                 continue
-            rel_table = reg_relation_target(table_key, prop_name) or table_key
+            rel_table = reg_relation_target(table_key, prop_name, project_key)
+            if rel_table is None:
+                q = f"Связь «{prop_name}»: цель не выведена из имени поля — свойство пропущено"
+                if q not in preview["questions"]:
+                    preview["questions"].append(q)
+                    preview["warnings"].append(q)
+                    preview["ok"] = False
+                continue
+            # видимая колонка (задача 3) — отказ виден в предпросмотре
+            route = choose_visible_binding(project_key, table_key, rel_table)
+            if not route.get("ok"):
+                q = route.get("error") or f"нет видимой колонки связи «{prop_name}»"
+                if q not in preview["questions"]:
+                    preview["questions"].append(q)
+                    preview["warnings"].append(q)
+                    preview["ok"] = False
+                continue
             names = [n.strip() for n in re.split(r'[,;]', str(prop_val)) if n.strip()]
             for n in names:
                 clean_n = re.sub(r'\s*[\(\[\{].*?[\)\]\}]\s*', '', n).strip()
@@ -546,7 +510,65 @@ def _get_table_id(project_key: str, table_key: str) -> str | None:
         return None
     return project["tables"].get(table_key)
 
-def create_article_in_table(project_key: str, table_key: str, title: str, properties: dict) -> dict:
+
+def _prepare_property_for_write(
+    project_key: str,
+    table_key: str,
+    label: str,
+    value,
+    resolver_data: dict | None = None,
+) -> tuple[str, object] | None:
+    """
+    Единый помощник записи свойства.
+    Возвращает (code, resolved_value) или None (свойство пропустить).
+    Raises UnknownPropertyCode при ошибке.
+    Для binding: имена → [{"id": uuid}, ...]; пустое значение → None (не стирать).
+    """
+    # маршрутизация связи
+    if reg_is_relation(table_key, label, project_key):
+        target = reg_relation_target(table_key, label, project_key)
+        if target is None:
+            raise UnknownPropertyCode(
+                f"Связь «{label}»: цель не выведена из имени поля — свойство пропущено"
+            )
+        route = choose_visible_binding(project_key, table_key, target)
+        if not route.get("ok"):
+            err = route.get("error") or "нет видимой колонки связи"
+            wf = route.get("write_from")
+            if wf:
+                err = f"{err} (write_from={wf})"
+            raise UnknownPropertyCode(err)
+        label = route["prop_name"]
+
+        if resolver_data is None:
+            resolver_data = build_title_to_ids(project_key)
+        names = [n.strip() for n in re.split(r"[,;]", str(value)) if n.strip()]
+        if not names:
+            # пустое значение — не стирать существующие связи
+            return None
+        ids = []
+        for n in names:
+            clean = re.sub(r"\s*[\(\[\{].*?[\)\]\}]\s*", "", n).strip()
+            if not clean:
+                continue
+            r = resolve_name(clean, target, resolver_data)
+            if r["status"] != "ok":
+                raise UnknownPropertyCode(
+                    r.get("question") or f"Связь «{label}»: «{clean}» не резолвится в id"
+                )
+            ids.append({"id": r["id"]})
+        if not ids:
+            return None
+        code = prop_code(project_key, table_key, label)
+        return code, ids
+
+    # обычное свойство (select / text / ...)
+    code = prop_code(project_key, table_key, label)
+    resolved = resolve_select_value(project_key, table_key, label, value)
+    return code, resolved
+
+
+def create_article_in_table(project_key: str, table_key: str, title: str, properties: dict, resolver_data: dict | None = None) -> dict:
     """
     Создаёт строку в умной таблице.
     Сигнатура: (project_key, table_key, ...) — table_id берётся из PROJECTS/registry.
@@ -570,8 +592,12 @@ def create_article_in_table(project_key: str, table_key: str, title: str, proper
     prop_list = []
     try:
         for label, value in properties.items():
-            code = prop_code(project_key, table_key, label)
-            resolved = resolve_select_value(project_key, table_key, label, value)
+            prepared = _prepare_property_for_write(
+                project_key, table_key, label, value, resolver_data
+            )
+            if prepared is None:
+                continue  # пустое значение связи — не стирать
+            code, resolved = prepared
             prop_list.append({
                 "method": "add",
                 "code": code,
@@ -601,7 +627,7 @@ def create_article_in_table(project_key: str, table_key: str, title: str, proper
         return {"ok": False, "id": None, "error": str(e)}
 
 
-def update_article_properties(project_key: str, table_key: str, article_id: str, properties: dict, title: str = "") -> dict:
+def update_article_properties(project_key: str, table_key: str, article_id: str, properties: dict, title: str = "", resolver_data: dict | None = None) -> dict:
     """
     Обновляет свойства. Форма подтверждена перехватом 26.07:
     code=group → commands[] с property_update, одно свойство на команду.
@@ -623,8 +649,12 @@ def update_article_properties(project_key: str, table_key: str, article_id: str,
     commands = []
     try:
         for label, value in properties.items():
-            code = prop_code(project_key, table_key, label)
-            resolved = resolve_select_value(project_key, table_key, label, value)
+            prepared = _prepare_property_for_write(
+                project_key, table_key, label, value, resolver_data
+            )
+            if prepared is None:
+                continue  # пустое значение связи — не стирать
+            code, resolved = prepared
             commands.append({
                 "code": "property_update",
                 "payload": {
@@ -733,7 +763,7 @@ def apply_delta(delta_text: str, project_key: str = "burevestnik") -> dict:
 
         try:
             if effective == "создать":
-                result = create_article_in_table(project_key, table_key, title, act["properties"])
+                result = create_article_in_table(project_key, table_key, title, act["properties"], resolver_data)
                 if not result["ok"]:
                     report["failed"].append({
                         "title": title,
@@ -778,7 +808,7 @@ def apply_delta(delta_text: str, project_key: str = "burevestnik") -> dict:
                 article_id = res_name["id"]
                 # свойства
                 if act["properties"]:
-                    ur = update_article_properties(project_key, table_key, article_id, act["properties"], title)
+                    ur = update_article_properties(project_key, table_key, article_id, act["properties"], title, resolver_data)
                     if not ur["ok"]:
                         report["failed"].append({
                             "title": title,
@@ -1411,7 +1441,7 @@ def resolve_relation(val, id_to_title):
 
 def _code_to_label(project_key: str, table_key: str, code: str) -> str:
     """Обратная карта code → имя. Только внутри одной таблицы."""
-    tmap = (CODES.get(project_key) or {}).get(table_key) or {}
+    tmap = (get_codes(project_key) or {}).get(table_key) or {}
     for name, meta in tmap.items():
         c = meta.get("code") if isinstance(meta, dict) else meta
         if c == code:
@@ -1420,7 +1450,7 @@ def _code_to_label(project_key: str, table_key: str, code: str) -> str:
 
 def _option_id_to_text(project_key: str, table_key: str, code: str, opt_id: str) -> str:
     """option id → текст. Только внутри одной таблицы."""
-    tmap = (CODES.get(project_key) or {}).get(table_key) or {}
+    tmap = (get_codes(project_key) or {}).get(table_key) or {}
     for name, meta in tmap.items():
         if not isinstance(meta, dict):
             continue
@@ -2377,46 +2407,108 @@ def api_known_reset(doc_id):
 
 @app.route("/selfcheck")
 def selfcheck():
-    """Приёмка 9: схема, коды, PROJECTS vs SCHEMA."""
+    """
+    Задача 7: ok по живой схеме проекта, не по schema_v7.
+    schema_v7_diff — отдельный раздел, на ok не влияет.
+    """
     from schema_v7 import SCHEMA
     from documents import redis_get
+    from pathlib import Path as _P
+    import json as _json
+
     result = {
-        "schema_tables": len(SCHEMA),
         "projects": list(PROJECTS.keys()),
         "codes_loaded": {},
-        "missing_codes": [],
-        "projects_not_in_schema": [],
-        "schema_mismatch": [],
+        "missing_props": [],
+        "binding_visible_ok": [],
+        "binding_visible_fail": [],
+        "schema_v7_diff": [],
+        "stale_jobs": None,
     }
+
+    # binding_visible data
+    bv_path = _P(__file__).resolve().parent / "samples" / "binding_visible.json"
+    bv = {}
+    if bv_path.exists():
+        with open(bv_path, encoding="utf-8") as f:
+            bv = _json.load(f)
+
     for pk in PROJECTS:
-        codes = CODES.get(pk) or redis_get(f"schema:codes:{pk}") or {}
+        codes = get_codes(pk) or redis_get(f"schema:codes:{pk}") or {}
         if not isinstance(codes, dict):
             codes = {}
         result["codes_loaded"][pk] = {t: len(v) for t, v in codes.items()}
+
+        # живые таблицы проекта
         proj_tables = set((PROJECTS[pk].get("tables") or {}).keys()) | set(codes.keys())
+
+        # missing: таблица проекта без свойств в карте
+        for tkey in proj_tables:
+            if not codes.get(tkey):
+                result["missing_props"].append({"project": pk, "table": tkey, "got": 0})
+
+        # binding_visible: каждое видимое поле есть в живой схеме и type=binding, цель выводится
+        for tkey, fields in (bv.get(pk) or {}).items():
+            for fname in fields or []:
+                meta = None
+                table_codes = codes.get(tkey) or {}
+                for name, m in table_codes.items():
+                    if reg_normalize(name) == reg_normalize(fname):
+                        meta = m if isinstance(m, dict) else {"type": "text"}
+                        break
+                target = reg_relation_target(tkey, fname, pk)
+                if meta and meta.get("type") == "binding" and target:
+                    result["binding_visible_ok"].append(f"{pk}.{tkey}.{fname}->{target}")
+                else:
+                    result["binding_visible_fail"].append({
+                        "project": pk, "table": tkey, "field": fname,
+                        "type": (meta or {}).get("type"),
+                        "target": target,
+                    })
+
+        # schema_v7_diff (информативно, на ok не влияет)
         schema_tables = set(SCHEMA.keys())
-        if proj_tables and proj_tables != schema_tables:
-            only_proj = sorted(proj_tables - schema_tables)
-            only_schema = sorted(schema_tables - proj_tables)
-            result["schema_mismatch"].append({
+        only_proj = sorted(proj_tables - schema_tables)
+        only_schema = sorted(schema_tables - proj_tables)
+        if only_proj or only_schema:
+            result["schema_v7_diff"].append({
                 "project": pk,
                 "only_in_project": only_proj,
                 "only_in_schema_v7": only_schema,
-                "note": "схема проекта не совпадает с v7 — писать по именам v7 нельзя",
             })
-        for tkey in SCHEMA:
-            expected = len(SCHEMA[tkey].get("properties", [])) + len(SCHEMA[tkey].get("relations", []))
-            got = len(codes.get(tkey, {}))
-            if got < expected and tkey in proj_tables:
-                result["missing_codes"].append({"project": pk, "table": tkey, "expected": expected, "got": got})
-        for tkey in (PROJECTS[pk].get("tables") or {}):
-            if tkey not in SCHEMA:
-                result["projects_not_in_schema"].append(f"{pk}.{tkey}")
-    result["ok"] = (
-        not result["missing_codes"]
-        and not result["projects_not_in_schema"]
-        and not result["schema_mismatch"]
-    )
+
+    # stale jobs
+    try:
+        from phase_engine import get_stale_startup_status
+        st = get_stale_startup_status()
+        if st is None:
+            result["stale_jobs"] = {"status": "not_started", "note": "обход не запускался"}
+        elif isinstance(st, dict) and st.get("status") == "running":
+            result["stale_jobs"] = {"status": "running", "note": "обход ещё идёт"}
+        else:
+            result["stale_jobs"] = st
+    except Exception as e:
+        result["stale_jobs"] = {"error": str(e)}
+
+    # ok_by_project + schema_not_read
+    # карта не прочитана = ни в одной таблице нет свойств (не «словарь пуст»)
+    ok_by_project = {}
+    schema_not_read = []
+    for pk, counts in result["codes_loaded"].items():
+        if not any(counts.values()):
+            schema_not_read.append(pk)
+            continue
+        miss = [m for m in result["missing_props"] if m["project"] == pk]
+        fail = [f for f in result["binding_visible_fail"] if f.get("project") == pk]
+        ok_by_project[pk] = (not miss and not fail)
+    # missing_props только по проектам с картой
+    result["missing_props"] = [
+        m for m in result["missing_props"] if m["project"] not in schema_not_read
+    ]
+    result["ok_by_project"] = ok_by_project
+    result["schema_not_read"] = schema_not_read
+    # общий ok: все проекты с картой здоровы
+    result["ok"] = bool(ok_by_project) and all(ok_by_project.values())
     return jsonify(result)
 
 

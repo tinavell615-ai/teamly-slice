@@ -1,0 +1,17 @@
+{
+  "name": "05_unresolved_name",
+  "kind": "write_property",
+  "project": "burevestnik",
+  "table": "events",
+  "label": "Связанные персонажи",
+  "value": "Несуществующий Персонаж XYZ",
+  "expect": {
+    "ok": false,
+    "error_contains": [
+      "не найден",
+      "не резолвится",
+      "Проблема",
+      "неоднознач"
+    ]
+  }
+}

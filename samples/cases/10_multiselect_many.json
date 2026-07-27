@@ -1,0 +1,14 @@
+{
+  "name": "10_multiselect_many",
+  "kind": "call",
+  "call": "schema_live.resolve_select_value",
+  "args": [
+    "burevestnik",
+    "characters",
+    "Линия/Род",
+    "Поттер, Дамблдор"
+  ],
+  "expect": {
+    "raises": "UnknownPropertyCode"
+  }
+}

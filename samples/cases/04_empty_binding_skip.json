@@ -1,0 +1,12 @@
+{
+  "name": "04_empty_binding_skip",
+  "kind": "write_property",
+  "project": "burevestnik",
+  "table": "events",
+  "label": "Связанные персонажи",
+  "value": "",
+  "expect": {
+    "ok": true,
+    "skipped": true
+  }
+}

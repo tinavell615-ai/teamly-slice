@@ -1,0 +1,16 @@
+{
+  "name": "11_hidden_routes_to_visible",
+  "kind": "write_property",
+  "project": "burevestnik",
+  "table": "events",
+  "label": "Персонажи",
+  "value": "Том Реддл",
+  "expect": {
+    "ok": true,
+    "code": "K3b5",
+    "value_is_id_list": true,
+    "value_ids_from_names": [
+      "Том Реддл"
+    ]
+  }
+}

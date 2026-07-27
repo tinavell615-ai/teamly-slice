@@ -1,0 +1,12 @@
+{
+  "name": "06_hooks_need_approval",
+  "kind": "preview",
+  "project": "burevestnik",
+  "delta": "ТАБЛИЦА: Крючки\nНАЗВАНИЕ: ⚡ Тестовый крючок\nДЕЙСТВИЕ: создать\n",
+  "expect": {
+    "ok": false,
+    "warnings_contain": [
+      "подтвержден"
+    ]
+  }
+}

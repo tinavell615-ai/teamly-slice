@@ -1,0 +1,10 @@
+{
+  "name": "09_tom_updates_not_creates",
+  "kind": "preview",
+  "project": "burevestnik",
+  "delta": "ТАБЛИЦА: Персонажи\nНАЗВАНИЕ: Том\nДЕЙСТВИЕ: создать\n",
+  "expect": {
+    "creates": 0,
+    "updates_min": 1
+  }
+}

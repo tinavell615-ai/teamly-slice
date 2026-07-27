@@ -43,19 +43,36 @@ def _redis_headers() -> dict:
     return {"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"}
 
 
+def redis_command(*args, timeout: int | None = None) -> Any:
+    """
+    Универсальная команда Upstash REST: POST body = ["CMD", arg1, ...].
+    Единственная точка транспорта. redis_get / redis_set и SCAN идут через неё.
+    Возвращает result или raises RuntimeError с телом ответа.
+    timeout: для SET — 60 с (большие тексты рукописей), остальное — 30 с.
+    """
+    if not UPSTASH_REDIS_REST_URL or not UPSTASH_REDIS_REST_TOKEN:
+        raise RuntimeError("Redis не настроен (UPSTASH_*)")
+    if timeout is None:
+        timeout = 60 if (args and str(args[0]).upper() == "SET") else 30
+    r = requests.post(
+        UPSTASH_REDIS_REST_URL,
+        headers={**_redis_headers(), "Content-Type": "application/json"},
+        json=list(args),
+        timeout=timeout,
+    )
+    if r.status_code != 200:
+        raise RuntimeError(f"redis_command {args[0] if args else '?'}: HTTP {r.status_code} {r.text[:300]}")
+    data = r.json()
+    if "error" in data:
+        raise RuntimeError(f"redis_command {args[0] if args else '?'}: {data['error']}")
+    return data.get("result")
+
+
 def redis_get(key: str) -> Any | None:
     if not UPSTASH_REDIS_REST_URL or not UPSTASH_REDIS_REST_TOKEN:
         return None
     try:
-        r = requests.get(
-            f"{UPSTASH_REDIS_REST_URL}/get/{key}",
-            headers=_redis_headers(),
-            timeout=20,
-        )
-        if r.status_code != 200:
-            return None
-        data = r.json()
-        result = data.get("result")
+        result = redis_command("GET", key)
         if result is None:
             return None
         if isinstance(result, str):
@@ -75,20 +92,39 @@ def redis_set(key: str, value: Any) -> bool:
         return False
     try:
         payload = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-        # Команда в теле — большие тексты не упираются в лимит URL
-        r = requests.post(
-            UPSTASH_REDIS_REST_URL,
-            headers={**_redis_headers(), "Content-Type": "application/json"},
-            json=["SET", key, payload],
-            timeout=60,
-        )
-        if r.status_code != 200:
-            print(f"[docs] redis_set failed {r.status_code}: {r.text[:200]}")
-            return False
+        redis_command("SET", key, payload)  # timeout=60 по умолчанию для SET
         return True
     except Exception as e:
         print(f"[docs] redis_set {key}: {e}")
         return False
+
+
+def redis_scan(match: str, count: int = 100, max_iterations: int = 50) -> list[str]:
+    """
+    SCAN курсором. Возвращает список уникальных ключей, подходящих под match.
+    Бросает RuntimeError, если команда недоступна или обход не завершился
+    за max_iterations (защита от зацикливания).
+    """
+    seen: set[str] = set()
+    keys: list[str] = []
+    cursor = "0"
+    for _ in range(max_iterations):
+        # Upstash: SCAN cursor MATCH pattern COUNT n → [next_cursor, [key, ...]]
+        result = redis_command("SCAN", cursor, "MATCH", match, "COUNT", str(count))
+        if not isinstance(result, (list, tuple)) or len(result) < 2:
+            raise RuntimeError(f"SCAN unexpected result: {result!r}")
+        cursor = str(result[0])
+        batch = result[1] or []
+        for k in batch:
+            sk = str(k)
+            if sk not in seen:
+                seen.add(sk)
+                keys.append(sk)
+        if cursor == "0":
+            return keys
+    raise RuntimeError(
+        f"SCAN не завершился за {max_iterations} итераций (match={match!r}, last_cursor={cursor!r})"
+    )
 
 
 def _index_key(project: str) -> str:
@@ -369,11 +405,7 @@ def delete_document(project: str, doc_id: str) -> bool:
     if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
         for key in (_meta_key(project, doc_id), _text_key(project, doc_id), _chapters_key(project, doc_id)):
             try:
-                requests.post(
-                    f"{UPSTASH_REDIS_REST_URL}/del/{key}",
-                    headers=_redis_headers(),
-                    timeout=15,
-                )
+                redis_command("DEL", key)
             except Exception:
                 pass
     return True

@@ -319,8 +319,104 @@ def start_phase_job(
     return {"ok": True, "job_id": job_id, "status": "queued"}
 
 
+STALE_AFTER_SECONDS = 600
+
+
+def _is_job_stale(job: dict) -> tuple[bool, int]:
+    """
+    Единая проверка: зависло ли задание.
+    Возвращает (is_stale, age_seconds). Порог — STALE_AFTER_SECONDS.
+    """
+    if not job or job.get("status") != "running":
+        return False, 0
+    started = job.get("started_at")
+    if not started:
+        return False, 0
+    try:
+        from datetime import datetime, timezone
+        t0 = datetime.strptime(started, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - t0).total_seconds()
+        return age > STALE_AFTER_SECONDS, int(age)
+    except Exception:
+        return False, 0
+
+
+def _mark_job_stale(job: dict, age: int, reason: str = "") -> dict:
+    """Записывает status=stale и текст ошибки. Возвращает обновлённый job."""
+    job = dict(job)
+    job["status"] = "stale"
+    suffix = f", {reason}" if reason else ""
+    job["error"] = job.get("error") or (
+        f"зависшее задание (running {age}s > {STALE_AFTER_SECONDS}s{suffix})"
+    )
+    job["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return job
+
+
 def get_phase_job(job_id: str) -> dict | None:
-    return redis_get(_job_key(job_id))
+    job = redis_get(_job_key(job_id))
+    if not job or not isinstance(job, dict):
+        return job
+    is_stale, age = _is_job_stale(job)
+    if is_stale:
+        job = _mark_job_stale(job, age)
+        redis_set(_job_key(job_id), job)
+    return job
+
+
+# Результат обхода при старте (для /selfcheck).
+# None = ещё не запускали; {"status": "running"} = идёт; иначе итоговый dict.
+_STALE_STARTUP_RESULT: dict | None = None
+
+
+def mark_stale_jobs_on_startup() -> dict:
+    """
+    SCAN jobs:phase:*, пометить running старше STALE_AFTER_SECONDS как stale.
+    Возвращает {"ok": True, "scanned": N, "marked": M} или {"ok": False, "error": "..."}.
+    Полное возобновление заданий в пакет не входит.
+    """
+    global _STALE_STARTUP_RESULT
+    _STALE_STARTUP_RESULT = {"status": "running"}
+    try:
+        from documents import redis_scan, redis_get, redis_set
+        keys = redis_scan("jobs:phase:*", count=50, max_iterations=30)
+        marked = 0
+        for key in keys:
+            job = redis_get(key)
+            if not job or not isinstance(job, dict):
+                continue
+            is_stale, age = _is_job_stale(job)
+            if is_stale:
+                job = _mark_job_stale(job, age, reason="startup")
+                redis_set(key, job)
+                marked += 1
+        result = {"ok": True, "scanned": len(keys), "marked": marked}
+    except Exception as e:
+        result = {"ok": False, "error": str(e)}
+    _STALE_STARTUP_RESULT = result
+    return result
+
+
+def get_stale_startup_status() -> dict | None:
+    """Для /selfcheck: результат mark_stale_jobs_on_startup (или status=running)."""
+    return _STALE_STARTUP_RESULT
+
+
+def _run_stale_scan_in_background() -> None:
+    """Фоновый поток: обход не блокирует импорт и старт gunicorn."""
+    import threading
+    def worker():
+        try:
+            mark_stale_jobs_on_startup()
+        except Exception as e:
+            global _STALE_STARTUP_RESULT
+            _STALE_STARTUP_RESULT = {"ok": False, "error": str(e)}
+    t = threading.Thread(target=worker, daemon=True, name="stale-jobs-scan")
+    t.start()
+
+
+# При импорте — только запуск фона. Старт процесса не ждёт Upstash.
+_run_stale_scan_in_background()
 
 
 def reset_known(project: str, doc_id: str) -> dict:
